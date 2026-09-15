@@ -1,0 +1,13 @@
+sysc-clipboard includes protocol descriptions distributed by the following
+upstream projects. The original copyright and licence text is preserved in
+each XML file.
+
+ext-data-control-v1.xml
+  Source: https://gitlab.freedesktop.org/wayland/wayland-protocols
+  Installed source: /usr/share/wayland-protocols/staging/ext-data-control/ext-data-control-v1.xml
+  SHA-256: 293deba5dfdb974fbcf8dcf891a30a51a36a8bba0047dc6bdf6a03194089b7fb
+
+wlr-data-control-unstable-v1.xml
+  Source: https://gitlab.freedesktop.org/wlroots/wlr-protocols
+  Installed source: /usr/share/qt6/wayland/protocols/wlr-data-control/wlr-data-control-unstable-v1.xml
+  SHA-256: 5ac39552975b28d0ea42f636a79b7fc8e2d1fcfa31cbe173f549bd4b044ae2de
