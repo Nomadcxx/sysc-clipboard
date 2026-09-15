@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -279,6 +280,30 @@ func TestServicePublishesWaylandStateChangeWithoutRevision(t *testing.T) {
 	message := nextMessage(t, sub.Updates)
 	if message.Type != protocol.TypeSnapshot || message.Snapshot == nil || message.Snapshot.Revision != 0 || message.Snapshot.Wayland != protocol.WaylandReady {
 		t.Fatalf("wayland state message = %+v", message)
+	}
+}
+
+func TestServiceSetGenerationRejectsOlderCaptureWithoutPublishing(t *testing.T) {
+	svc := newTestService(t, history.New(0))
+	sub, err := svc.Subscribe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sub.Close)
+	_ = nextMessage(t, sub.Updates)
+
+	if err := svc.SetGeneration(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Capture(context.Background(), textCapture(0, "stale", time.Unix(1, 0))); !errors.Is(err, history.ErrStaleGeneration) {
+		t.Fatalf("stale capture error = %v, want %v", err, history.ErrStaleGeneration)
+	}
+	if err := svc.Capture(context.Background(), textCapture(1, "current", time.Unix(2, 0))); err != nil {
+		t.Fatal(err)
+	}
+	message := nextMessage(t, sub.Updates)
+	if message.Type != protocol.TypeDelta || message.Delta == nil || message.Delta.Revision != 1 || message.Delta.Changes[0].Entry.Preview != "current" {
+		t.Fatalf("capture after generation change = %+v", message)
 	}
 }
 

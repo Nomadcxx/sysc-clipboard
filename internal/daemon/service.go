@@ -60,15 +60,17 @@ const (
 	requestUnsubscribe
 	requestSnapshot
 	requestWayland
+	requestGeneration
 )
 
 type serviceRequest struct {
-	kind    requestKind
-	capture history.Capture
-	message protocol.Message
-	wayland protocol.WaylandState
-	sub     *Subscription
-	reply   chan serviceReply
+	kind       requestKind
+	capture    history.Capture
+	message    protocol.Message
+	wayland    protocol.WaylandState
+	generation uint64
+	sub        *Subscription
+	reply      chan serviceReply
 }
 
 type serviceReply struct {
@@ -205,6 +207,24 @@ func (service *Service) SetWaylandState(ctx context.Context, wayland protocol.Wa
 	}
 }
 
+// SetGeneration advances the capture generation without publishing a history
+// revision. Wayland offer workers use it to reject results from an older
+// selection.
+func (service *Service) SetGeneration(ctx context.Context, generation uint64) error {
+	reply := make(chan serviceReply, 1)
+	if err := service.submitRequest(ctx, serviceRequest{kind: requestGeneration, generation: generation, reply: reply}); err != nil {
+		return err
+	}
+	select {
+	case result := <-reply:
+		return result.err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-service.done:
+		return ErrServiceClosed
+	}
+}
+
 func (subscription *Subscription) Close() {
 	if subscription == nil {
 		return
@@ -272,6 +292,9 @@ func (service *Service) run(options Options) {
 				request.reply <- serviceReply{snapshot: state.snapshot()}
 			case requestWayland:
 				request.reply <- serviceReply{err: state.setWayland(request.wayland)}
+			case requestGeneration:
+				state.history.SetGeneration(request.generation)
+				request.reply <- serviceReply{}
 			case requestSubscribe:
 				nextSubscriptionID++
 				updates := make(chan protocol.Message, 1)
