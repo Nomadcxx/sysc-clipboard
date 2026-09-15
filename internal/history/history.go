@@ -21,6 +21,7 @@ var (
 	ErrLimit           = errors.New("clipboard history limit exceeded")
 	ErrStaleGeneration = errors.New("stale clipboard capture generation")
 	ErrNotFound        = errors.New("clipboard history entry not found")
+	ErrInvalidScope    = errors.New("invalid clipboard history clear scope")
 )
 
 const (
@@ -221,6 +222,40 @@ func (history *History) SetPinned(id string, pinned bool) ([]protocol.Change, er
 	next = insertRecord(next, insertAt, entry)
 	history.entries = next
 	return []protocol.Change{changeFor(protocol.ChangeUpdated, entry)}, nil
+}
+
+func (history *History) Delete(id string) ([]protocol.Change, error) {
+	index := history.indexOf(id)
+	if index < 0 {
+		return nil, ErrNotFound
+	}
+	removed := history.entries[index]
+	history.entries = append(history.entries[:index], history.entries[index+1:]...)
+	history.totalBytes -= removed.metadata.Size
+	return []protocol.Change{changeFor(protocol.ChangeRemoved, removed)}, nil
+}
+
+func (history *History) Clear(scope protocol.ClearScope) ([]protocol.Change, error) {
+	if scope != protocol.ClearUnpinned && scope != protocol.ClearAll {
+		return nil, ErrInvalidScope
+	}
+	if len(history.entries) == 0 {
+		return nil, nil
+	}
+	kept := make([]record, 0, len(history.entries))
+	changes := make([]protocol.Change, 0, len(history.entries))
+	var total uint64
+	for _, entry := range history.entries {
+		if scope == protocol.ClearUnpinned && entry.metadata.Pinned {
+			kept = append(kept, entry)
+			total += entry.metadata.Size
+			continue
+		}
+		changes = append(changes, changeFor(protocol.ChangeRemoved, entry))
+	}
+	history.entries = kept
+	history.totalBytes = total
+	return changes, nil
 }
 
 func (history *History) Snapshot() []protocol.Entry {

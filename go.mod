@@ -5,6 +5,5 @@ go 1.26
 require (
 	github.com/Nomadcxx/sysc-wayland v0.2.1
 	github.com/godbus/dbus/v5 v5.2.2
+	golang.org/x/sys v0.47.0
 )
-
-require golang.org/x/sys v0.47.0 // indirect
