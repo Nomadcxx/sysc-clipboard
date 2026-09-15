@@ -52,6 +52,20 @@ func (item Item) Payload() []byte {
 	return bytes.Clone(item.payload)
 }
 
+func NewItem(metadata protocol.Entry, payload []byte) (Item, error) {
+	if err := protocol.ValidateEntry(metadata); err != nil {
+		return Item{}, fmt.Errorf("%w: %v", ErrInvalidCapture, err)
+	}
+	if uint64(len(payload)) != metadata.Size {
+		return Item{}, fmt.Errorf("%w: payload size does not match metadata", ErrInvalidCapture)
+	}
+	hash := sha256.Sum256(payload)
+	if metadata.SHA256 != hex.EncodeToString(hash[:]) {
+		return Item{}, fmt.Errorf("%w: payload hash does not match metadata", ErrInvalidCapture)
+	}
+	return Item{metadata: cloneEntry(metadata), payload: bytes.Clone(payload)}, nil
+}
+
 type record struct {
 	metadata protocol.Entry
 	payload  []byte
@@ -223,6 +237,42 @@ func (history *History) Items() []Item {
 		items[index] = Item{metadata: cloneEntry(entry.metadata), payload: bytes.Clone(entry.payload)}
 	}
 	return items
+}
+
+func (history *History) Replace(items []Item) error {
+	if len(items) > history.maxEntries {
+		return ErrLimit
+	}
+	next := make([]record, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	var total uint64
+	seenUnpinned := false
+	for _, item := range items {
+		valid, err := NewItem(item.Metadata(), item.Payload())
+		if err != nil {
+			return err
+		}
+		metadata := valid.Metadata()
+		if _, ok := seen[metadata.ID]; ok {
+			return fmt.Errorf("%w: duplicate entry ID %q", ErrInvalidCapture, metadata.ID)
+		}
+		seen[metadata.ID] = struct{}{}
+		if metadata.Pinned {
+			if seenUnpinned {
+				return fmt.Errorf("%w: pinned entry follows an unpinned entry", ErrInvalidCapture)
+			}
+		} else {
+			seenUnpinned = true
+		}
+		if metadata.Size > history.maxBytes-total {
+			return ErrLimit
+		}
+		total += metadata.Size
+		next = append(next, record{metadata: metadata, payload: valid.Payload()})
+	}
+	history.entries = next
+	history.totalBytes = total
+	return nil
 }
 
 func (history *History) Count() int {

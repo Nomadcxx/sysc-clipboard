@@ -200,6 +200,47 @@ func TestHistorySnapshotsDoNotExposeMutableState(t *testing.T) {
 	}
 }
 
+func TestNewItemAndReplaceValidatePayloadIdentity(t *testing.T) {
+	source := New(1)
+	if _, err := source.Capture(capture(1, protocol.KindText, "text/plain", "persisted", time.Unix(1, 0).UTC())); err != nil {
+		t.Fatal(err)
+	}
+	item := source.Items()[0]
+	restored := New(1)
+	if err := restored.Replace([]Item{item}); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(restored.Items()[0].Payload()); got != "persisted" {
+		t.Fatalf("restored payload = %q", got)
+	}
+
+	metadata := item.Metadata()
+	metadata.Size++
+	if _, err := NewItem(metadata, item.Payload()); !errors.Is(err, ErrInvalidCapture) {
+		t.Fatalf("mismatched metadata error = %v, want ErrInvalidCapture", err)
+	}
+}
+
+func TestReplaceIsAllOrNothingWhenAnItemIsInvalid(t *testing.T) {
+	source := New(1)
+	if _, err := source.Capture(capture(1, protocol.KindText, "text/plain", "existing", time.Unix(1, 0).UTC())); err != nil {
+		t.Fatal(err)
+	}
+	items := source.Items()
+	bad := items[0].Metadata()
+	bad.ID = "bad/id"
+	if _, err := NewItem(bad, items[0].Payload()); err == nil {
+		t.Fatal("invalid item construction succeeded")
+	}
+	invalid := Item{metadata: bad, payload: items[0].Payload()}
+	if err := source.Replace([]Item{invalid}); err == nil {
+		t.Fatal("invalid item replacement succeeded")
+	}
+	if source.Count() != 1 || source.Snapshot()[0].Preview != "existing" {
+		t.Fatal("valid state was not retained")
+	}
+}
+
 func previews(entries []protocol.Entry) []string {
 	result := make([]string, len(entries))
 	for i, entry := range entries {
