@@ -264,6 +264,24 @@ func TestServiceSlowSubscriberCoalescesToCurrentSnapshot(t *testing.T) {
 	}
 }
 
+func TestServicePublishesWaylandStateChangeWithoutRevision(t *testing.T) {
+	svc := newTestService(t, history.New(1))
+	sub, err := svc.Subscribe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sub.Close)
+	_ = nextMessage(t, sub.Updates)
+
+	if err := svc.SetWaylandState(context.Background(), protocol.WaylandReady); err != nil {
+		t.Fatal(err)
+	}
+	message := nextMessage(t, sub.Updates)
+	if message.Type != protocol.TypeSnapshot || message.Snapshot == nil || message.Snapshot.Revision != 0 || message.Snapshot.Wayland != protocol.WaylandReady {
+		t.Fatalf("wayland state message = %+v", message)
+	}
+}
+
 func TestServiceThumbnailIsBoundedPNGAndRejectsText(t *testing.T) {
 	svc := newTestService(t, history.New(1))
 	sub, err := svc.Subscribe(context.Background())
@@ -291,7 +309,7 @@ func TestServiceThumbnailIsBoundedPNGAndRejectsText(t *testing.T) {
 	added := nextMessage(t, sub.Updates)
 	id := added.Delta.Changes[0].ID
 	response := svc.Execute(context.Background(), protocol.Message{Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-1", ID: id, MaxPX: 1})
-	if response.Type != protocol.TypeThumbnail || response.Thumbnail == nil {
+	if response.Type != protocol.TypeThumbnail || response.RequestID != "thumb-1" || response.Thumbnail == nil {
 		t.Fatalf("thumbnail response = %+v", response)
 	}
 	if err := protocol.ValidateThumbnail(*response.Thumbnail); err != nil {

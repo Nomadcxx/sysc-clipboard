@@ -22,13 +22,14 @@ import (
 var (
 	ErrServiceClosed        = errors.New("clipboard service is closed")
 	ErrRestoreUnavailable   = errors.New("clipboard restore is unavailable")
+	ErrInvalidWaylandState  = errors.New("invalid clipboard Wayland state")
 	ErrThumbnailUnsupported = errors.New("clipboard thumbnail is unsupported")
 	ErrThumbnailLimit       = errors.New("clipboard thumbnail exceeds a limit")
 )
 
 const (
 	maxDecodedPixels = 16 << 20
-	serviceQueueSize = 32
+	serviceQueueSize = 4
 )
 
 // Options supplies the state owned by the reducer. History must not be used
@@ -58,12 +59,14 @@ const (
 	requestSubscribe
 	requestUnsubscribe
 	requestSnapshot
+	requestWayland
 )
 
 type serviceRequest struct {
 	kind    requestKind
 	capture history.Capture
 	message protocol.Message
+	wayland protocol.WaylandState
 	sub     *Subscription
 	reply   chan serviceReply
 }
@@ -118,6 +121,8 @@ func (service *Service) Close() {
 
 // Capture submits a completed Wayland offer read to the reducer.
 func (service *Service) Capture(ctx context.Context, capture history.Capture) error {
+	capture.Payload = bytes.Clone(capture.Payload)
+	capture.OfferedMIME = append([]string(nil), capture.OfferedMIME...)
 	return service.submit(ctx, serviceRequest{
 		kind:    requestCapture,
 		capture: capture,
@@ -131,6 +136,7 @@ func (service *Service) Execute(ctx context.Context, message protocol.Message) p
 	if err := protocol.ValidateMessage(message); err != nil {
 		return errorMessage("", protocol.ErrorProtocol, "invalid clipboard command")
 	}
+	message = cloneMessage(message)
 	reply := make(chan serviceReply, 1)
 	request := serviceRequest{kind: requestCommand, message: message, reply: reply}
 	if err := service.submitRequest(ctx, request); err != nil {
@@ -179,6 +185,23 @@ func (service *Service) CurrentSnapshot(ctx context.Context) (protocol.Snapshot,
 		return protocol.Snapshot{}, ctx.Err()
 	case <-service.done:
 		return protocol.Snapshot{}, ErrServiceClosed
+	}
+}
+
+// SetWaylandState publishes a capability change without advancing the
+// history revision.
+func (service *Service) SetWaylandState(ctx context.Context, wayland protocol.WaylandState) error {
+	reply := make(chan serviceReply, 1)
+	if err := service.submitRequest(ctx, serviceRequest{kind: requestWayland, wayland: wayland, reply: reply}); err != nil {
+		return err
+	}
+	select {
+	case result := <-reply:
+		return result.err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-service.done:
+		return ErrServiceClosed
 	}
 }
 
@@ -247,6 +270,8 @@ func (service *Service) run(options Options) {
 				request.reply <- serviceReply{message: state.execute(request.message)}
 			case requestSnapshot:
 				request.reply <- serviceReply{snapshot: state.snapshot()}
+			case requestWayland:
+				request.reply <- serviceReply{err: state.setWayland(request.wayland)}
 			case requestSubscribe:
 				nextSubscriptionID++
 				updates := make(chan protocol.Message, 1)
@@ -328,9 +353,11 @@ func (state *reducerState) execute(message protocol.Message) protocol.Message {
 		if err != nil {
 			return thumbnailError(message.RequestID, err)
 		}
-		return protocol.Message{Version: protocol.Version, Type: protocol.TypeThumbnail, Thumbnail: &thumbnail}
+		return protocol.Message{Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: message.RequestID, Thumbnail: &thumbnail}
 	case protocol.TypeResync:
-		return state.snapshotMessage()
+		response := state.snapshotMessage()
+		response.RequestID = message.RequestID
+		return response
 	default:
 		return errorMessage(message.RequestID, protocol.ErrorUnsupported, "unsupported clipboard command")
 	}
@@ -361,6 +388,21 @@ func (state *reducerState) commit(changes []protocol.Change) {
 	for _, subscription := range state.subscribers {
 		state.publish(subscription, message)
 	}
+}
+
+func (state *reducerState) setWayland(wayland protocol.WaylandState) error {
+	if wayland != protocol.WaylandReady && wayland != protocol.WaylandUnavailable {
+		return ErrInvalidWaylandState
+	}
+	if state.wayland == wayland {
+		return nil
+	}
+	state.wayland = wayland
+	message := state.snapshotMessage()
+	for _, subscription := range state.subscribers {
+		state.publish(subscription, message)
+	}
+	return nil
 }
 
 func (state *reducerState) publish(subscription *Subscription, message protocol.Message) {
@@ -464,6 +506,10 @@ func cloneChanges(changes []protocol.Change) []protocol.Change {
 
 func cloneMessage(message protocol.Message) protocol.Message {
 	cloned := message
+	if message.Pinned != nil {
+		pinned := *message.Pinned
+		cloned.Pinned = &pinned
+	}
 	if message.Hello != nil {
 		hello := *message.Hello
 		hello.Capabilities = append([]string(nil), message.Hello.Capabilities...)

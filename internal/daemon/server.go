@@ -176,6 +176,7 @@ func (server *Server) serveClient(parent context.Context, connection *net.UnixCo
 	if !ok || initial.Type != protocol.TypeSnapshot || initial.Snapshot == nil {
 		return
 	}
+	tracker := newRevisionTracker(initial.Snapshot.Revision)
 	if err := connection.SetReadDeadline(time.Time{}); err != nil {
 		return
 	}
@@ -238,6 +239,7 @@ func (server *Server) serveClient(parent context.Context, connection *net.UnixCo
 					finish()
 					return
 				}
+				tracker.Mark(messageRevision(message))
 			case <-clientContext.Done():
 				return
 			}
@@ -254,6 +256,10 @@ func (server *Server) serveClient(parent context.Context, connection *net.UnixCo
 				return
 			}
 			response := server.service.Execute(clientContext, message)
+			if response.Type == protocol.TypeAck && response.Ack != nil && !tracker.Wait(clientContext, response.Ack.Revision) {
+				finish()
+				return
+			}
 			if err := queue.Enqueue(response, func() (protocol.Message, error) {
 				snapshot, err := server.service.CurrentSnapshot(clientContext)
 				if err != nil {
@@ -273,6 +279,57 @@ func (server *Server) serveClient(parent context.Context, connection *net.UnixCo
 		finish()
 	}
 	workers.Wait()
+}
+
+func messageRevision(message protocol.Message) uint64 {
+	switch message.Type {
+	case protocol.TypeSnapshot:
+		if message.Snapshot != nil {
+			return message.Snapshot.Revision
+		}
+	case protocol.TypeDelta:
+		if message.Delta != nil {
+			return message.Delta.Revision
+		}
+	}
+	return 0
+}
+
+type revisionTracker struct {
+	mu       sync.Mutex
+	revision uint64
+	changed  chan struct{}
+}
+
+func newRevisionTracker(revision uint64) *revisionTracker {
+	return &revisionTracker{revision: revision, changed: make(chan struct{})}
+}
+
+func (tracker *revisionTracker) Mark(revision uint64) {
+	tracker.mu.Lock()
+	if revision > tracker.revision {
+		tracker.revision = revision
+		close(tracker.changed)
+		tracker.changed = make(chan struct{})
+	}
+	tracker.mu.Unlock()
+}
+
+func (tracker *revisionTracker) Wait(ctx context.Context, revision uint64) bool {
+	for {
+		tracker.mu.Lock()
+		if tracker.revision >= revision {
+			tracker.mu.Unlock()
+			return true
+		}
+		changed := tracker.changed
+		tracker.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 func (server *Server) helloMessage(snapshot protocol.Snapshot) protocol.Message {

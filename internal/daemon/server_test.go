@@ -179,6 +179,35 @@ func TestOutboundQueueReplacesOverflowWithOneSnapshot(t *testing.T) {
 	}
 }
 
+func TestRevisionTrackerWaitsForPublishedRevision(t *testing.T) {
+	tracker := newRevisionTracker(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan bool, 1)
+	go func() { finished <- tracker.Wait(ctx, 2) }()
+
+	select {
+	case <-finished:
+		t.Fatal("revision wait completed before the target revision")
+	case <-time.After(10 * time.Millisecond):
+	}
+	tracker.Mark(1)
+	select {
+	case <-finished:
+		t.Fatal("revision wait completed before the target revision")
+	case <-time.After(10 * time.Millisecond):
+	}
+	tracker.Mark(2)
+	select {
+	case ok := <-finished:
+		if !ok {
+			t.Fatal("revision wait returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("revision wait did not complete")
+	}
+}
+
 func waitForSocket(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
