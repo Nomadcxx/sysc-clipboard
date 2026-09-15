@@ -1,0 +1,13 @@
+[Unit]
+Description=sysc clipboard history daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/sysc-clipboard
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+WantedBy=default.target
