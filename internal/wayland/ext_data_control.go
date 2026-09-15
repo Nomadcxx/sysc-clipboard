@@ -340,6 +340,10 @@ func (i *ExtDataControlDeviceV1) SetPrimarySelectionHandler(f ExtDataControlDevi
 	i.primarySelectionHandler = f
 }
 
+func (i *ExtDataControlDeviceV1) HasFD(opcode uint32) bool {
+	return false
+}
+
 func (i *ExtDataControlDeviceV1) Dispatch(opcode uint32, fd int, data []byte) {
 	switch opcode {
 	case 0:
@@ -531,6 +535,15 @@ func (i *ExtDataControlSourceV1) SetCancelledHandler(f ExtDataControlSourceV1Can
 	i.cancelledHandler = f
 }
 
+func (i *ExtDataControlSourceV1) HasFD(opcode uint32) bool {
+	switch opcode {
+	case 0:
+		return true
+	default:
+		return false
+	}
+}
+
 func (i *ExtDataControlSourceV1) Dispatch(opcode uint32, fd int, data []byte) {
 	switch opcode {
 	case 0:
@@ -650,6 +663,10 @@ type ExtDataControlOfferV1OfferHandlerFunc func(ExtDataControlOfferV1OfferEvent)
 // SetOfferHandler : sets handler for ExtDataControlOfferV1OfferEvent
 func (i *ExtDataControlOfferV1) SetOfferHandler(f ExtDataControlOfferV1OfferHandlerFunc) {
 	i.offerHandler = f
+}
+
+func (i *ExtDataControlOfferV1) HasFD(opcode uint32) bool {
+	return false
 }
 
 func (i *ExtDataControlOfferV1) Dispatch(opcode uint32, fd int, data []byte) {

@@ -307,6 +307,9 @@ func (owner *Owner) Run(ctx context.Context) error {
 		}
 		ready, err := owner.backend.wait(ownerPollInterval)
 		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
 			return err
 		}
 		if !ready {

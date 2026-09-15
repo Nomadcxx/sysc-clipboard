@@ -528,6 +528,32 @@ func TestOwnerRestoresOnlyAfterDeletedOfferIsAcknowledged(t *testing.T) {
 	}
 }
 
+func TestOwnerRetriesInterruptedWaylandWait(t *testing.T) {
+	backend := newFakeBackend()
+	backend.waitError = unix.EINTR
+	owner := newOwner(backend, OwnerOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- owner.Run(ctx) }()
+
+	select {
+	case <-owner.ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not become ready")
+	}
+	backend.push(owner.handleFinished)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrOwnerFinished) {
+			t.Fatalf("owner error = %v, want %v after interrupted wait", err, ErrOwnerFinished)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner stopped waiting after EINTR")
+	}
+}
+
 func TestOwnerReadAndWriteWorkersAreBoundedAndComplete(t *testing.T) {
 	backend := newFakeBackend()
 	owner := runTestOwner(t, backend, OwnerOptions{})
@@ -660,6 +686,7 @@ type fakeBackend struct {
 	events         chan func()
 	next           func()
 	roundtripCount int
+	waitError      error
 }
 
 func newFakeBackend() *fakeBackend {
@@ -677,6 +704,11 @@ func (backend *fakeBackend) roundtrip() error {
 }
 
 func (backend *fakeBackend) wait(timeout time.Duration) (bool, error) {
+	if backend.waitError != nil {
+		err := backend.waitError
+		backend.waitError = nil
+		return false, err
+	}
 	select {
 	case backend.next = <-backend.events:
 		return true, nil

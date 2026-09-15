@@ -336,6 +336,10 @@ func (i *ZwlrDataControlDeviceV1) SetPrimarySelectionHandler(f ZwlrDataControlDe
 	i.primarySelectionHandler = f
 }
 
+func (i *ZwlrDataControlDeviceV1) HasFD(opcode uint32) bool {
+	return false
+}
+
 func (i *ZwlrDataControlDeviceV1) Dispatch(opcode uint32, fd int, data []byte) {
 	switch opcode {
 	case 0:
@@ -527,6 +531,15 @@ func (i *ZwlrDataControlSourceV1) SetCancelledHandler(f ZwlrDataControlSourceV1C
 	i.cancelledHandler = f
 }
 
+func (i *ZwlrDataControlSourceV1) HasFD(opcode uint32) bool {
+	switch opcode {
+	case 0:
+		return true
+	default:
+		return false
+	}
+}
+
 func (i *ZwlrDataControlSourceV1) Dispatch(opcode uint32, fd int, data []byte) {
 	switch opcode {
 	case 0:
@@ -646,6 +659,10 @@ type ZwlrDataControlOfferV1OfferHandlerFunc func(ZwlrDataControlOfferV1OfferEven
 // SetOfferHandler : sets handler for ZwlrDataControlOfferV1OfferEvent
 func (i *ZwlrDataControlOfferV1) SetOfferHandler(f ZwlrDataControlOfferV1OfferHandlerFunc) {
 	i.offerHandler = f
+}
+
+func (i *ZwlrDataControlOfferV1) HasFD(opcode uint32) bool {
+	return false
 }
 
 func (i *ZwlrDataControlOfferV1) Dispatch(opcode uint32, fd int, data []byte) {
