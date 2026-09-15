@@ -496,6 +496,38 @@ func TestOwnerRestoreKeepsSourceUntilCancellation(t *testing.T) {
 	waitFor(t, source.isDestroyed)
 }
 
+func TestOwnerRestoresOnlyAfterDeletedOfferIsAcknowledged(t *testing.T) {
+	backend := newFakeBackend()
+	owner := runTestOwner(t, backend, OwnerOptions{})
+	offer := &fakeOffer{idValue: 20}
+	backend.push(func() {
+		owner.offers[offer.idValue] = &offerState{offer: offer}
+		owner.offerOrder = append(owner.offerOrder, offer.idValue)
+		owner.currentOffer = offer
+		owner.currentOfferID = offer.idValue
+		owner.destroyOffer(offer.idValue)
+	})
+	waitFor(t, offer.isDestroyed)
+	before := backend.roundtripCount
+
+	itemHistory := history.New(1)
+	if _, err := itemHistory.Capture(history.Capture{
+		Generation: 1,
+		Kind:       protocol.KindText,
+		MIME:       "text/plain",
+		Payload:    []byte("restore after delete"),
+		CapturedAt: time.Unix(1, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Restore(itemHistory.Items()[0]); err != nil {
+		t.Fatal(err)
+	}
+	if backend.roundtripCount <= before {
+		t.Fatalf("restore roundtrips = %d, want more than %d", backend.roundtripCount, before)
+	}
+}
+
 func TestOwnerReadAndWriteWorkersAreBoundedAndComplete(t *testing.T) {
 	backend := newFakeBackend()
 	owner := runTestOwner(t, backend, OwnerOptions{})
@@ -598,6 +630,18 @@ func TestOwnerCleanupDestroysCurrentOfferOnce(t *testing.T) {
 	}
 }
 
+func TestOwnerForgetsDestroyedOfferID(t *testing.T) {
+	owner := newOwner(newFakeBackend(), OwnerOptions{})
+	offer := &fakeOffer{idValue: 21}
+	owner.offers[offer.idValue] = &offerState{offer: offer}
+	owner.offerOrder = []uint32{offer.idValue}
+
+	owner.destroyOffer(offer.idValue)
+	if got := offer.releaseCountValue(); got != 1 {
+		t.Fatalf("offer release count = %d, want one", got)
+	}
+}
+
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
@@ -611,10 +655,11 @@ func equalStrings(got, want []string) bool {
 }
 
 type fakeBackend struct {
-	manager *fakeManager
-	device  *fakeDevice
-	events  chan func()
-	next    func()
+	manager        *fakeManager
+	device         *fakeDevice
+	events         chan func()
+	next           func()
+	roundtripCount int
 }
 
 func newFakeBackend() *fakeBackend {
@@ -626,7 +671,10 @@ func (backend *fakeBackend) bind() (dataControlManager, dataControlDevice, error
 	return backend.manager, backend.device, nil
 }
 
-func (backend *fakeBackend) roundtrip() error { return nil }
+func (backend *fakeBackend) roundtrip() error {
+	backend.roundtripCount++
+	return nil
+}
 
 func (backend *fakeBackend) wait(timeout time.Duration) (bool, error) {
 	select {
@@ -748,6 +796,7 @@ type fakeOffer struct {
 	receiveMIMEs   []string
 	destroyed      bool
 	destroyCount   int
+	releaseCount   int
 	receiveStarted chan struct{}
 	receiveOnce    sync.Once
 }
@@ -785,6 +834,12 @@ func (offer *fakeOffer) destroy() error {
 	return nil
 }
 
+func (offer *fakeOffer) release() {
+	offer.mu.Lock()
+	defer offer.mu.Unlock()
+	offer.releaseCount++
+}
+
 func (offer *fakeOffer) isDestroyed() bool {
 	offer.mu.Lock()
 	defer offer.mu.Unlock()
@@ -795,6 +850,12 @@ func (offer *fakeOffer) destroyCountValue() int {
 	offer.mu.Lock()
 	defer offer.mu.Unlock()
 	return offer.destroyCount
+}
+
+func (offer *fakeOffer) releaseCountValue() int {
+	offer.mu.Lock()
+	defer offer.mu.Unlock()
+	return offer.releaseCount
 }
 
 func (offer *fakeOffer) emitMIME(mime string) {

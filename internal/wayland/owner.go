@@ -93,6 +93,7 @@ type dataControlOffer interface {
 	setOfferHandler(func(string))
 	receive(string, int) error
 	destroy() error
+	release()
 }
 
 type waylandBackend interface {
@@ -139,6 +140,10 @@ type Owner struct {
 	currentRead *readState
 	pendingRead *pendingReadRequest
 	backup      *selectionBackup
+	// A server-created offer stays registered in the Wayland context until
+	// wl_display.delete_id arrives. Do not create a replacement selection
+	// before that acknowledgement, because a compositor may reuse its ID.
+	offerDeletionPending bool
 
 	sources        map[uint32]*sourceState
 	awaitingSource uint32
@@ -383,7 +388,7 @@ func (owner *Owner) handleDataOffer(offer dataControlOffer) {
 	}
 	id := offer.id()
 	if id == 0 {
-		_ = offer.destroy()
+		destroyOfferProxy(offer)
 		return
 	}
 	if _, exists := owner.offers[id]; exists {
@@ -399,7 +404,7 @@ func (owner *Owner) handleDataOffer(offer dataControlOffer) {
 			}
 		}
 		if !removed {
-			_ = offer.destroy()
+			destroyOfferProxy(offer)
 			return
 		}
 	}
@@ -431,7 +436,11 @@ func (owner *Owner) handlePrimarySelection(offer dataControlOffer) {
 	if offer == nil || offer.id() == owner.currentOfferID {
 		return
 	}
-	owner.destroyOffer(offer.id())
+	if _, exists := owner.offers[offer.id()]; exists {
+		owner.destroyOffer(offer.id())
+		return
+	}
+	destroyOfferProxy(offer)
 }
 
 func (owner *Owner) handleSelection(offer dataControlOffer) {
@@ -585,6 +594,13 @@ func (owner *Owner) offerPayload(kind protocol.Kind, mime string, payload []byte
 	if len(mimes) == 0 || len(payload) == 0 {
 		return ErrOwnerUnavailable
 	}
+	if owner.offerDeletionPending {
+		owner.offerDeletionPending = false
+		if err := owner.backend.roundtrip(); err != nil {
+			owner.offerDeletionPending = true
+			return err
+		}
+	}
 	source, err := owner.manager.createSource()
 	if err != nil {
 		return err
@@ -681,7 +697,8 @@ func (owner *Owner) destroyOffer(id uint32) {
 	if state == nil {
 		return
 	}
-	_ = state.offer.destroy()
+	destroyOfferProxy(state.offer)
+	owner.offerDeletionPending = true
 	delete(owner.offers, id)
 	for index, oldID := range owner.offerOrder {
 		if oldID == id {
@@ -691,13 +708,21 @@ func (owner *Owner) destroyOffer(id uint32) {
 	}
 }
 
+func destroyOfferProxy(offer dataControlOffer) {
+	if offer == nil {
+		return
+	}
+	_ = offer.destroy()
+	offer.release()
+}
+
 func (owner *Owner) cleanupProxies() {
 	if owner.currentOffer != nil {
 		current := owner.currentOffer
 		if owner.currentOfferID != 0 && owner.offers[owner.currentOfferID] != nil {
 			owner.destroyOffer(owner.currentOfferID)
 		} else {
-			_ = current.destroy()
+			destroyOfferProxy(current)
 		}
 		owner.currentOffer = nil
 		owner.currentOfferID = 0
@@ -1060,6 +1085,12 @@ type extOffer struct{ proxy *ExtDataControlOfferV1 }
 func (offer *extOffer) id() uint32                        { return offer.proxy.ID() }
 func (offer *extOffer) receive(mime string, fd int) error { return offer.proxy.Receive(mime, fd) }
 func (offer *extOffer) destroy() error                    { return offer.proxy.Destroy() }
+func (offer *extOffer) release() {
+	// Niri reuses data-control offer IDs before emitting delete_id. The
+	// destroy request is already queued, and destroyed offers receive no
+	// valid events, so remove the proxy at this boundary.
+	offer.proxy.Context().DeleteID(offer.proxy.ID())
+}
 func (offer *extOffer) setOfferHandler(handler func(string)) {
 	offer.proxy.SetOfferHandler(func(event ExtDataControlOfferV1OfferEvent) { handler(event.MimeType) })
 }
@@ -1147,6 +1178,10 @@ type wlrOffer struct{ proxy *ZwlrDataControlOfferV1 }
 func (offer *wlrOffer) id() uint32                        { return offer.proxy.ID() }
 func (offer *wlrOffer) receive(mime string, fd int) error { return offer.proxy.Receive(mime, fd) }
 func (offer *wlrOffer) destroy() error                    { return offer.proxy.Destroy() }
+func (offer *wlrOffer) release() {
+	// Keep the wlroots adapter consistent with the ext adapter above.
+	offer.proxy.Context().DeleteID(offer.proxy.ID())
+}
 func (offer *wlrOffer) setOfferHandler(handler func(string)) {
 	offer.proxy.SetOfferHandler(func(event ZwlrDataControlOfferV1OfferEvent) { handler(event.MimeType) })
 }
