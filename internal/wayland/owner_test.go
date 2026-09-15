@@ -106,7 +106,7 @@ func TestOwnerIgnoresPrimaryAndCapturesTextAndImageMIMEs(t *testing.T) {
 	backend := newFakeBackend()
 	captures := make(chan history.Capture, 2)
 	owner := runTestOwner(t, backend, OwnerOptions{
-		Capture: func(capture history.Capture) error {
+		Capture: func(_ context.Context, capture history.Capture) error {
 			captures <- capture
 			return nil
 		},
@@ -154,9 +154,12 @@ func TestOwnerDoesNotBlockWaylandDispatchOnCapturePersistence(t *testing.T) {
 	releaseCapture := make(chan struct{})
 	var captureOnce sync.Once
 	runTestOwner(t, backend, OwnerOptions{
-		Capture: func(history.Capture) error {
+		Capture: func(ctx context.Context, _ history.Capture) error {
 			captureOnce.Do(func() { close(captureStarted) })
-			<-releaseCapture
+			select {
+			case <-releaseCapture:
+			case <-ctx.Done():
+			}
 			return nil
 		},
 	})
@@ -198,7 +201,7 @@ func TestOwnerSerializesCapturePersistence(t *testing.T) {
 	var valuesMu sync.Mutex
 	var values []string
 	runTestOwner(t, backend, OwnerOptions{
-		Capture: func(capture history.Capture) error {
+		Capture: func(_ context.Context, capture history.Capture) error {
 			value := string(capture.Payload)
 			valuesMu.Lock()
 			values = append(values, value)
@@ -260,7 +263,7 @@ func TestOwnerUsesKindLimitBeforeCapture(t *testing.T) {
 	backend := newFakeBackend()
 	captures := make(chan history.Capture, 1)
 	owner := runTestOwner(t, backend, OwnerOptions{
-		Capture: func(capture history.Capture) error {
+		Capture: func(_ context.Context, capture history.Capture) error {
 			captures <- capture
 			return nil
 		},
@@ -311,10 +314,131 @@ func TestOwnerClosesReplacedAndCancelledPendingReadFDs(t *testing.T) {
 	}
 }
 
+func TestOwnerDoesNotBlockWaylandDispatchOnGenerationPublication(t *testing.T) {
+	backend := newFakeBackend()
+	generationStarted := make(chan struct{})
+	releaseGeneration := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseGeneration) }) })
+	runTestOwner(t, backend, OwnerOptions{
+		SetGeneration: func(ctx context.Context, _ uint64) error {
+			close(generationStarted)
+			select {
+			case <-releaseGeneration:
+			case <-ctx.Done():
+			}
+			return nil
+		},
+	})
+
+	offer := &fakeOffer{idValue: 35, payload: []byte("generation"), receiveStarted: make(chan struct{})}
+	backend.push(func() {
+		backend.device.emitDataOffer(offer)
+		offer.emitMIME("text/plain")
+		backend.device.emitSelection(offer)
+	})
+	select {
+	case <-generationStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("generation callback did not start")
+	}
+	select {
+	case <-offer.receiveStarted:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Wayland dispatch stopped behind generation publication")
+	}
+	releaseOnce.Do(func() { close(releaseGeneration) })
+}
+
+func TestOwnerReportsCaptureQueueSaturation(t *testing.T) {
+	reports := make(chan error, 1)
+	captureStarted := make(chan struct{})
+	releaseCapture := make(chan struct{})
+	var captureOnce sync.Once
+	var releaseOnce sync.Once
+	owner := newOwner(newFakeBackend(), OwnerOptions{
+		Capture: func(_ context.Context, _ history.Capture) error {
+			captureOnce.Do(func() { close(captureStarted) })
+			<-releaseCapture
+			return nil
+		},
+		CaptureError: func(err error) { reports <- err },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go owner.captureLoop(ctx)
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseCapture) })
+		cancel()
+		close(owner.captureJobs)
+		<-owner.captureDone
+		close(owner.captureErrors)
+	})
+	owner.captureJobs <- captureJob{}
+	select {
+	case <-captureStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture callback did not start")
+	}
+	for index := 0; index < maxCaptureQueue; index++ {
+		owner.captureJobs <- captureJob{}
+	}
+	if owner.enqueueCapture(captureJob{}) {
+		t.Fatal("capture queue accepted an item past its bound")
+	}
+	releaseOnce.Do(func() { close(releaseCapture) })
+	select {
+	case err := <-reports:
+		if !errors.Is(err, ErrCaptureQueueFull) {
+			t.Fatalf("capture overflow error = %v, want %v", err, ErrCaptureQueueFull)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture queue saturation was not reported")
+	}
+}
+
+func TestOwnerCancelsCapturePersistenceOnShutdown(t *testing.T) {
+	backend := newFakeBackend()
+	captureStarted := make(chan struct{})
+	owner := newOwner(backend, OwnerOptions{
+		Capture: func(ctx context.Context, capture history.Capture) error {
+			close(captureStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- owner.Run(ctx) }()
+	select {
+	case <-owner.ready:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("owner did not become ready")
+	}
+	offer := &fakeOffer{idValue: 36, payload: []byte("shutdown")}
+	backend.push(func() {
+		backend.device.emitDataOffer(offer)
+		offer.emitMIME("text/plain")
+		backend.device.emitSelection(offer)
+	})
+	select {
+	case <-captureStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("capture callback did not start")
+	}
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not stop after capture cancellation")
+	}
+}
+
 func TestOwnerDiscardsStaleReadResult(t *testing.T) {
 	var captures []history.Capture
 	owner := newOwner(newFakeBackend(), OwnerOptions{
-		Capture: func(capture history.Capture) error {
+		Capture: func(_ context.Context, capture history.Capture) error {
 			captures = append(captures, capture)
 			return nil
 		},
@@ -412,13 +536,13 @@ func TestOwnerReadResultReAdoptionDoesNotDuplicateHistory(t *testing.T) {
 	var historyMu sync.Mutex
 	backend := newFakeBackend()
 	owner := runTestOwner(t, backend, OwnerOptions{
-		SetGeneration: func(generation uint64) error {
+		SetGeneration: func(_ context.Context, generation uint64) error {
 			historyMu.Lock()
 			defer historyMu.Unlock()
 			historyState.SetGeneration(generation)
 			return nil
 		},
-		Capture: func(capture history.Capture) error {
+		Capture: func(_ context.Context, capture history.Capture) error {
 			historyMu.Lock()
 			defer historyMu.Unlock()
 			_, err := historyState.Capture(capture)

@@ -35,6 +35,7 @@ var (
 	ErrOwnerUnavailable = errors.New("clipboard Wayland owner is unavailable")
 	ErrOwnerRunning     = errors.New("clipboard Wayland owner is already running")
 	ErrOwnerFinished    = errors.New("clipboard data-control device finished")
+	ErrCaptureQueueFull = errors.New("clipboard capture queue is full")
 	ErrSourceLimit      = errors.New("clipboard source queue is full")
 )
 
@@ -45,8 +46,14 @@ type globalAnnouncement struct {
 }
 
 type OwnerOptions struct {
-	Capture         func(history.Capture) error
-	SetGeneration   func(uint64) error
+	// Capture runs serially off the Wayland owner goroutine. The context is
+	// cancelled when the owner stops.
+	Capture func(context.Context, history.Capture) error
+	// CaptureError receives capture queue and persistence failures off the
+	// Wayland owner goroutine.
+	CaptureError func(error)
+	// SetGeneration runs in the same ordered worker as Capture.
+	SetGeneration   func(context.Context, uint64) error
 	SetWaylandState func(protocol.WaylandState) error
 }
 
@@ -109,13 +116,14 @@ type Owner struct {
 	started  chan struct{}
 	runOnce  sync.Once
 
-	readJobs    chan readJob
-	readResults chan readResult
-	readDone    chan struct{}
-	captureJobs chan history.Capture
-	captureDone chan struct{}
-	writeJobs   chan writeJob
-	writeDone   chan struct{}
+	readJobs      chan readJob
+	readResults   chan readResult
+	readDone      chan struct{}
+	captureJobs   chan captureJob
+	captureErrors chan error
+	captureDone   chan struct{}
+	writeJobs     chan writeJob
+	writeDone     chan struct{}
 
 	generation    uint64
 	generationErr error
@@ -197,23 +205,30 @@ type writeJob struct {
 	payload []byte
 }
 
+type captureJob struct {
+	generation    uint64
+	setGeneration bool
+	capture       history.Capture
+}
+
 func newOwner(backend waylandBackend, options OwnerOptions) *Owner {
 	return &Owner{
-		backend:     backend,
-		options:     options,
-		commands:    make(chan ownerCommand, ownerCommandQueue),
-		ready:       make(chan struct{}),
-		done:        make(chan struct{}),
-		started:     make(chan struct{}),
-		readJobs:    make(chan readJob, 1),
-		readResults: make(chan readResult, 1),
-		readDone:    make(chan struct{}),
-		captureJobs: make(chan history.Capture, maxCaptureQueue),
-		captureDone: make(chan struct{}),
-		writeJobs:   make(chan writeJob, maxWriteQueue),
-		writeDone:   make(chan struct{}),
-		offers:      make(map[uint32]*offerState),
-		sources:     make(map[uint32]*sourceState),
+		backend:       backend,
+		options:       options,
+		commands:      make(chan ownerCommand, ownerCommandQueue),
+		ready:         make(chan struct{}),
+		done:          make(chan struct{}),
+		started:       make(chan struct{}),
+		readJobs:      make(chan readJob, 1),
+		readResults:   make(chan readResult, 1),
+		readDone:      make(chan struct{}),
+		captureJobs:   make(chan captureJob, maxCaptureQueue),
+		captureErrors: make(chan error, 1),
+		captureDone:   make(chan struct{}),
+		writeJobs:     make(chan writeJob, maxWriteQueue),
+		writeDone:     make(chan struct{}),
+		offers:        make(map[uint32]*offerState),
+		sources:       make(map[uint32]*sourceState),
 	}
 }
 
@@ -240,9 +255,11 @@ func (owner *Owner) Run(ctx context.Context) error {
 	defer close(owner.done)
 
 	go owner.readLoop()
-	go owner.captureLoop()
+	captureContext, cancelCapture := context.WithCancel(ctx)
+	go owner.captureLoop(captureContext)
 	go owner.writeLoop()
 	defer func() {
+		cancelCapture()
 		owner.cancelRead()
 		owner.cancelSources()
 		close(owner.readJobs)
@@ -251,6 +268,7 @@ func (owner *Owner) Run(ctx context.Context) error {
 		<-owner.readDone
 		<-owner.captureDone
 		<-owner.writeDone
+		close(owner.captureErrors)
 		owner.cleanupProxies()
 		owner.publishWayland(protocol.WaylandUnavailable)
 		if owner.backend != nil {
@@ -419,8 +437,11 @@ func (owner *Owner) handlePrimarySelection(offer dataControlOffer) {
 func (owner *Owner) handleSelection(offer dataControlOffer) {
 	owner.generation++
 	owner.generationErr = nil
-	if owner.options.SetGeneration != nil {
-		owner.generationErr = owner.options.SetGeneration(owner.generation)
+	if owner.options.SetGeneration != nil && !owner.enqueueCapture(captureJob{
+		generation:    owner.generation,
+		setGeneration: true,
+	}) {
+		owner.generationErr = ErrCaptureQueueFull
 	}
 
 	owner.cancelRead()
@@ -541,12 +562,7 @@ func (owner *Owner) acceptPayload(result readResult) {
 			Payload:     bytes.Clone(result.payload),
 			CapturedAt:  time.Now().UTC(),
 		}
-		select {
-		case owner.captureJobs <- capture:
-		default:
-			// ponytail: a fixed queue bounds memory and keeps dispatch live;
-			// persistence must become non-blocking before this ceiling is raised.
-		}
+		owner.enqueueCapture(captureJob{generation: result.generation, capture: capture})
 	}
 }
 
@@ -704,11 +720,71 @@ func (owner *Owner) writeLoop() {
 	}
 }
 
-func (owner *Owner) captureLoop() {
+func (owner *Owner) enqueueCapture(job captureJob) bool {
+	select {
+	case owner.captureJobs <- job:
+		return true
+	default:
+		owner.reportCaptureError(ErrCaptureQueueFull)
+		return false
+	}
+}
+
+func (owner *Owner) reportCaptureError(err error) {
+	if owner.options.CaptureError == nil || err == nil {
+		return
+	}
+	select {
+	case owner.captureErrors <- err:
+	default:
+	}
+}
+
+func (owner *Owner) captureLoop(ctx context.Context) {
 	defer close(owner.captureDone)
-	for capture := range owner.captureJobs {
-		if owner.options.Capture != nil {
-			_ = owner.options.Capture(capture)
+	jobs := owner.captureJobs
+	errorReports := owner.captureErrors
+	workerGeneration := uint64(0)
+	var generationErr error
+	for jobs != nil || errorReports != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case err, ok := <-errorReports:
+			if !ok {
+				errorReports = nil
+				continue
+			}
+			if owner.options.CaptureError != nil {
+				owner.options.CaptureError(err)
+			}
+		case job, ok := <-jobs:
+			if !ok {
+				jobs = nil
+				continue
+			}
+			if job.setGeneration {
+				workerGeneration = job.generation
+				generationErr = nil
+				if owner.options.SetGeneration != nil {
+					generationErr = owner.options.SetGeneration(ctx, job.generation)
+					if generationErr != nil {
+						owner.reportCaptureError(generationErr)
+					}
+				}
+				continue
+			}
+			if owner.options.SetGeneration != nil && (job.generation != workerGeneration || generationErr != nil) {
+				continue
+			}
+			if owner.options.Capture != nil {
+				if err := owner.options.Capture(ctx, job.capture); err != nil {
+					owner.reportCaptureError(err)
+				}
+			}
 		}
 	}
 }
