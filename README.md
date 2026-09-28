@@ -115,7 +115,7 @@ installed.
 
 ## License
 
-TODO: choose a license. The repository has no LICENSE file yet.
+BSD-3-Clause
 
 ---
 
