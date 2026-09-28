@@ -23,15 +23,18 @@ var (
 )
 
 const (
-	secretBusName        = "org.freedesktop.secrets"
-	secretObjectPath     = dbus.ObjectPath("/org/freedesktop/secrets")
-	secretServiceIface   = "org.freedesktop.Secret.Service"
-	secretItemIface      = "org.freedesktop.Secret.Item"
-	secretKeyLabel       = "sysc-clipboard encryption key"
-	secretAttributeName  = "application"
-	secretAttributeValue = "sysc-clipboard"
-	secretPurposeName    = "purpose"
-	secretPurposeValue   = "clipboard-history-v1"
+	secretBusName           = "org.freedesktop.secrets"
+	secretObjectPath        = dbus.ObjectPath("/org/freedesktop/secrets")
+	secretServiceIface      = "org.freedesktop.Secret.Service"
+	secretItemIface         = "org.freedesktop.Secret.Item"
+	secretCollectionIface   = "org.freedesktop.Secret.Collection"
+	secretSessionIface      = "org.freedesktop.Secret.Session"
+	secretDefaultCollection = dbus.ObjectPath("/org/freedesktop/secrets/aliases/default")
+	secretKeyLabel          = "sysc-clipboard encryption key"
+	secretAttributeName     = "application"
+	secretAttributeValue    = "sysc-clipboard"
+	secretPurposeName       = "purpose"
+	secretPurposeValue      = "clipboard-history-v1"
 )
 
 type secretValue struct {
@@ -188,8 +191,11 @@ func writeAll(writer io.Writer, data []byte) error {
 	return nil
 }
 
+// loadSecretServiceKey reads the clipboard key from the Secret Service, or
+// creates it in the default collection on first use. A private connection is
+// used so closing it cannot close the process's shared session bus.
 func loadSecretServiceKey() ([]byte, error) {
-	connection, err := dbus.SessionBus()
+	connection, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return nil, fmt.Errorf("%w: connect session bus: %v", ErrSecretUnavailable, err)
 	}
@@ -197,14 +203,10 @@ func loadSecretServiceKey() ([]byte, error) {
 	service := connection.Object(secretBusName, secretObjectPath)
 	var output dbus.Variant
 	var session dbus.ObjectPath
-	var prompt dbus.ObjectPath
-	if err := service.Call(secretServiceIface+".OpenSession", 0, "plain", dbus.MakeVariant(""), &output, &session, &prompt).Err; err != nil {
+	if err := service.Call(secretServiceIface+".OpenSession", 0, "plain", dbus.MakeVariant("")).Store(&output, &session); err != nil {
 		return nil, fmt.Errorf("%w: open session: %v", ErrSecretUnavailable, err)
 	}
-	defer service.Call(secretServiceIface+".CloseSession", 0, session)
-	if prompt != "" && prompt != "/" {
-		return nil, ErrSecretLocked
-	}
+	defer connection.Object(secretBusName, session).Call(secretSessionIface+".Close", 0)
 
 	attributes := map[string]string{
 		secretAttributeName: secretAttributeValue,
@@ -212,7 +214,7 @@ func loadSecretServiceKey() ([]byte, error) {
 	}
 	var unlocked []dbus.ObjectPath
 	var locked []dbus.ObjectPath
-	if err := service.Call(secretServiceIface+".SearchItems", 0, attributes, &unlocked, &locked).Err; err != nil {
+	if err := service.Call(secretServiceIface+".SearchItems", 0, attributes).Store(&unlocked, &locked); err != nil {
 		return nil, fmt.Errorf("%w: search key: %v", ErrSecretUnavailable, err)
 	}
 	if len(unlocked) == 0 {
@@ -228,8 +230,9 @@ func loadSecretServiceKey() ([]byte, error) {
 			secretItemIface + ".Attributes": dbus.MakeVariant(attributes),
 		}
 		value := secretValue{Session: session, Value: key, ContentType: "application/octet-stream"}
-		var item dbus.ObjectPath
-		if err := service.Call(secretServiceIface+".CreateItem", 0, properties, value, false, &item, &prompt).Err; err != nil {
+		var item, prompt dbus.ObjectPath
+		collection := connection.Object(secretBusName, secretDefaultCollection)
+		if err := collection.Call(secretCollectionIface+".CreateItem", 0, properties, value, false).Store(&item, &prompt); err != nil {
 			return nil, fmt.Errorf("%w: create key: %v", ErrSecretUnavailable, err)
 		}
 		if prompt != "" && prompt != "/" {
@@ -240,7 +243,7 @@ func loadSecretServiceKey() ([]byte, error) {
 
 	var value secretValue
 	item := connection.Object(secretBusName, unlocked[0])
-	if err := item.Call(secretItemIface+".GetSecret", 0, session, &value).Err; err != nil {
+	if err := item.Call(secretItemIface+".GetSecret", 0, session).Store(&value); err != nil {
 		return nil, fmt.Errorf("%w: read key: %v", ErrSecretUnavailable, err)
 	}
 	if len(value.Value) != KeyBytes {
