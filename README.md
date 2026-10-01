@@ -102,6 +102,9 @@ above.
 
 Primary selection (middle-click paste) is not captured.
 
+Selections a password manager marks as secret (the `x-kde-passwordManagerHint` type, set by KeePassXC,
+Bitwarden and others) are never recorded.
+
 ## Development
 
 ```bash
