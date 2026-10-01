@@ -78,6 +78,8 @@ func TestSelectCaptureMIMEPrefersTextAndThenImages(t *testing.T) {
 		{name: "UTF8 alias", mimes: []string{"UTF8_STRING"}, wantKind: protocol.KindText, wantMIME: "UTF8_STRING", wantOK: true},
 		{name: "preferred image", mimes: []string{"image/jpeg", "image/png"}, wantKind: protocol.KindImage, wantMIME: "image/png", wantOK: true},
 		{name: "unsupported", mimes: []string{"text/html", "application/octet-stream"}, wantOK: false},
+		{name: "password manager hint", mimes: []string{"text/plain;charset=utf-8", "x-kde-passwordManagerHint"}, wantOK: false},
+		{name: "password manager hint on an image", mimes: []string{"image/png", "x-kde-passwordManagerHint"}, wantOK: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

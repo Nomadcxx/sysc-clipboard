@@ -863,7 +863,15 @@ var captureImageMIMEs = []string{
 	"image/gif",
 }
 
+// passwordManagerHintMIME is the marker password managers (KeePassXC, Bitwarden
+// and others) add to an offer that carries a secret. Its presence alone means
+// the selection must not be recorded: history is long-lived and stored on disk.
+const passwordManagerHintMIME = "x-kde-passwordManagerHint"
+
 func selectCaptureMIME(offered []string) (kind protocol.Kind, mime string, ok bool) {
+	if containsString(offered, passwordManagerHintMIME) {
+		return "", "", false
+	}
 	for _, preferred := range captureTextMIMEs {
 		if containsString(offered, preferred) {
 			return protocol.KindText, preferred, true
