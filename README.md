@@ -1,76 +1,14 @@
-<p align="center"><img src="assets/wordmark.png" alt="sysc-clipboard" height="120"></p>
+![sysc-clipboard](assets/wordmark.png)
 
-<p align="center"><strong>Clipboard history for Wayland, encrypted at rest.</strong></p>
+Clipboard history for sysc-shell, with encrypted storage and a Go client. Captures Wayland
+clipboard selections; sysc-shell draws the history panel.
 
-<p align="center">Watches the clipboard, keeps the last 100 entries, and serves them to sysc-shell's clipboard panel over a private socket.</p>
+## Quick Links
 
-## What it is
+- [Documentation](#documentation)
+- [The sysc ecosystem](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/ecosystem.md)
 
-sysc-clipboard is the clipboard history daemon behind
-[sysc-shell](https://github.com/Nomadcxx/sysc-shell). It watches selections through
-`ext-data-control-v1` (falling back to `wlr-data-control`), stores text and images encrypted on
-disk, and exposes metadata, previews and thumbnails to the shell. The socket carries metadata, text previews and thumbnails; full clipboard payloads stay in the
-daemon.
-
-## How it fits together
-
-```mermaid
-flowchart LR
-    greet["sysc-greet<br/>graphical greeter"] -->|starts configured session| shell["sysc-shell<br/>desktop shell"]
-
-    subgraph session["Session"]
-        lock["sysc-lock<br/>session locker"]
-    end
-
-    subgraph daemons["Companion daemons"]
-        notify["sysc-notify<br/>notifications"]
-        clipboard["sysc-clipboard<br/>clipboard history"]
-        tray["sysc-tray<br/>system tray"]
-    end
-
-    subgraph wallpaper["Wallpaper and idle"]
-        gslapper["gSlapper<br/>video wallpaper"]
-        terminal["sysc-terminal<br/>terminal effects"]
-        walls["sysc-walls<br/>idle screensaver"]
-    end
-
-    subgraph libs["Shared Go libraries"]
-        wayland["sysc-wayland<br/>Wayland transport"]
-        launch["sysc-launch<br/>app launcher"]
-        metrics["sysc-metrics<br/>system telemetry"]
-    end
-
-    plugins["sysc-plugins<br/>plugin source"]
-
-    shell -->|spawns| session
-    shell -->|connects to| daemons
-    shell -->|drives| wallpaper
-    shell -->|links| libs
-    shell -->|installs from| plugins
-
-    classDef current fill:#7aa2f7,stroke:#1a1b26,color:#1a1b26,stroke-width:2px
-    class clipboard current
-```
-
-[The sysc ecosystem](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/ecosystem.md) explains
-each connection, socket and version pin.
-
-## Features
-
-- **100 entries, 256 MiB total**: text up to 4 MiB and images up to 32 MiB per entry
-- **Restores with the original MIME type**
-- **Pins**: pinned entries survive `ClearUnpinned` and sort first; `ClearAll` removes them
-- **Encrypted at rest**: AES-256-GCM per entry plus an encrypted manifest, with the key in the
-  Secret Service or a key file
-- **Survives restarts**: history is loaded from disk on start
-- **Private socket**: metadata, 200-byte text previews and PNG thumbnails only
-- **`ext-data-control-v1`** with a `zwlr-data-control` fallback
-- **Refuses password-manager selections** (`x-kde-passwordManagerHint`); the primary selection is
-  not captured
-- **Duplicate payloads** merge their MIME types and keep their pin
-- **A corrupt manifest is quarantined** and history degrades to volatile instead of failing
-
-## Install
+## Installation
 
 ### Requirements
 
@@ -132,6 +70,64 @@ go get github.com/Nomadcxx/sysc-clipboard/client
 
 The client package offers `Restore`, `Pin`, `Delete`, `Clear`, `Thumbnail` and `Resync`, plus an
 `Updates()` stream of snapshots and deltas.
+
+## History and storage
+
+- **100 entries, 256 MiB total**: text up to 4 MiB and images up to 32 MiB per entry
+- **Restores with the original MIME type**
+- **Pins**: pinned entries survive `ClearUnpinned` and sort first; `ClearAll` removes them
+- **Encrypted at rest**: AES-256-GCM per entry plus an encrypted manifest, with the key in the
+  Secret Service or a key file
+- **Survives restarts**: history is loaded from disk on start
+- **Private socket**: metadata, 200-byte text previews and PNG thumbnails only
+- **`ext-data-control-v1`** with a `zwlr-data-control` fallback
+- **Refuses password-manager selections** (`x-kde-passwordManagerHint`); the primary selection is
+  not captured
+- **Duplicate payloads** merge their MIME types and keep their pin
+- **A corrupt manifest is quarantined** and history degrades to volatile instead of failing
+
+## Ecosystem
+
+```mermaid
+flowchart LR
+    greet["sysc-greet<br/>graphical greeter"] -->|starts configured session| shell["sysc-shell<br/>desktop shell"]
+
+    subgraph session["Session"]
+        lock["sysc-lock<br/>session locker"]
+    end
+
+    subgraph daemons["Companion daemons"]
+        notify["sysc-notify<br/>notifications"]
+        clipboard["sysc-clipboard<br/>clipboard history"]
+        tray["sysc-tray<br/>system tray"]
+    end
+
+    subgraph wallpaper["Wallpaper and idle"]
+        gslapper["gSlapper<br/>video wallpaper"]
+        terminal["sysc-terminal<br/>terminal effects"]
+        walls["sysc-walls<br/>idle screensaver"]
+    end
+
+    subgraph libs["Shared Go libraries"]
+        wayland["sysc-wayland<br/>Wayland transport"]
+        launch["sysc-launch<br/>app launcher"]
+        metrics["sysc-metrics<br/>system telemetry"]
+    end
+
+    plugins["sysc-plugins<br/>plugin source"]
+
+    shell -->|spawns| session
+    shell -->|connects to| daemons
+    shell -->|drives| wallpaper
+    shell -->|links| libs
+    shell -->|installs from| plugins
+
+    classDef current fill:#7aa2f7,stroke:#1a1b26,color:#1a1b26,stroke-width:2px
+    class clipboard current
+```
+
+[The sysc ecosystem](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/ecosystem.md) explains
+each connection, socket and version pin.
 
 ## Documentation
 
