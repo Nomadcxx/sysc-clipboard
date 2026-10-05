@@ -1,43 +1,98 @@
-# sysc-clipboard
+<p align="center"><img src="assets/wordmark.png" alt="sysc-clipboard" height="120"></p>
 
-A clipboard history daemon for Wayland, written in Go. It keeps what you copy, text and images,
-encrypted on disk, and serves it to the clipboard panel in [sysc-shell](https://github.com/Nomadcxx/sysc-shell).
+<p align="center"><strong>Clipboard history for Wayland, encrypted at rest.</strong></p>
+
+<p align="center">Watches the clipboard, keeps the last 100 entries, and serves them to sysc-shell's clipboard panel over a private socket.</p>
+
+## What it is
+
+sysc-clipboard is the clipboard history daemon behind
+[sysc-shell](https://github.com/Nomadcxx/sysc-shell). It watches selections through
+`ext-data-control-v1` (falling back to `wlr-data-control`), stores text and images encrypted on
+disk, and exposes metadata, previews and thumbnails to the shell. The socket carries metadata, text previews and thumbnails; full clipboard payloads stay in the
+daemon.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    greet["sysc-greet<br/>graphical greeter"] -->|starts configured session| shell["sysc-shell<br/>desktop shell"]
+
+    subgraph session["Session"]
+        lock["sysc-lock<br/>session locker"]
+    end
+
+    subgraph daemons["Companion daemons"]
+        notify["sysc-notify<br/>notifications"]
+        clipboard["sysc-clipboard<br/>clipboard history"]
+        tray["sysc-tray<br/>system tray"]
+    end
+
+    subgraph wallpaper["Wallpaper and idle"]
+        gslapper["gSlapper<br/>video wallpaper"]
+        terminal["sysc-terminal<br/>terminal effects"]
+        walls["sysc-walls<br/>idle screensaver"]
+    end
+
+    subgraph libs["Shared Go libraries"]
+        wayland["sysc-wayland<br/>Wayland transport"]
+        launch["sysc-launch<br/>app launcher"]
+        metrics["sysc-metrics<br/>system telemetry"]
+    end
+
+    plugins["sysc-plugins<br/>plugin source"]
+
+    shell -->|spawns| session
+    shell -->|connects to| daemons
+    shell -->|drives| wallpaper
+    shell -->|links| libs
+    shell -->|installs from| plugins
+
+    classDef current fill:#7aa2f7,stroke:#1a1b26,color:#1a1b26,stroke-width:2px
+    class clipboard current
+```
+
+[The sysc ecosystem](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/ecosystem.md) explains
+each connection, socket and version pin.
 
 ## Features
 
-- **History**: the last 100 entries, text and images, up to 256 MiB in total
-- **Restore**: puts an entry back on the clipboard with its original MIME type
-- **Pins**: pinned entries stay put when you clear the rest
-- **Encrypted at rest**: each entry and the manifest are separate encrypted files, and no plaintext
-  payload is ever written. The key lives in your keyring, or in a key file for headless setups
-- **Survives restarts**: history comes back after a restart or a reboot
-- **Private socket**: clients get metadata, previews and thumbnails. The clipboard bytes never leave
-  the daemon
-- **Compositor support**: any compositor that offers `ext-data-control-v1`, with
-  `wlr-data-control-unstable-v1` as the fallback
+- **100 entries, 256 MiB total**: text up to 4 MiB and images up to 32 MiB per entry
+- **Restores with the original MIME type**
+- **Pins**: pinned entries survive `ClearUnpinned` and sort first; `ClearAll` removes them
+- **Encrypted at rest**: AES-256-GCM per entry plus an encrypted manifest, with the key in the
+  Secret Service or a key file
+- **Survives restarts**: history is loaded from disk on start
+- **Private socket**: metadata, 200-byte text previews and PNG thumbnails only
+- **`ext-data-control-v1`** with a `zwlr-data-control` fallback
+- **Refuses password-manager selections** (`x-kde-passwordManagerHint`); the primary selection is
+  not captured
+- **Duplicate payloads** merge their MIME types and keep their pin
+- **A corrupt manifest is quarantined** and history degrades to volatile instead of failing
 
-## Installation
+## Install
 
-**Requires:** Go 1.26+, a Wayland compositor with data-control, and a Secret Service provider such
-as gnome-keyring or KeePassXC (or see [Key and state](#key-and-state) to run without one).
+### Requirements
 
-### Build from Source
+Go 1.26+, a compositor with data-control, and a Secret Service provider (or `--key-file`).
+
+### From source
 
 ```bash
 git clone https://github.com/Nomadcxx/sysc-clipboard
 cd sysc-clipboard
 go build -o ~/.local/bin/sysc-clipboard ./cmd/sysc-clipboard
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### Via Go
+Or:
 
 ```bash
 GOBIN="$HOME/.local/bin" go install github.com/Nomadcxx/sysc-clipboard/cmd/sysc-clipboard@latest
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### Run it as a user service
-
-The unit in `contrib/` starts the daemon at login and restarts it if it dies:
+### As a user service
 
 ```bash
 install -Dm644 contrib/sysc-clipboard.service ~/.config/systemd/user/sysc-clipboard.service
@@ -45,80 +100,47 @@ systemctl --user daemon-reload
 systemctl --user enable --now sysc-clipboard.service
 ```
 
-The unit expects the binary at `~/.local/bin/sysc-clipboard`.
-
 ## Usage
 
-The daemon has no interface of its own. Copy things as usual and open the clipboard panel in
-sysc-shell to browse, restore, pin or delete them.
-
-Check where history lives and whether it will persist, without starting the daemon:
+sysc-clipboard has no interface of its own; sysc-shell draws the history. To inspect persistence and runtime configuration:
 
 ```bash
-$ sysc-clipboard --check
-state-dir: ~/.local/state/sysc-clipboard
-socket: /run/user/1000/sysc-clipboard/control.v1.sock
-entries: 1
-persistence: durable
+sysc-clipboard --check
 ```
 
-`durable` means history is encrypted on disk and will come back after a restart. Anything else
-means the daemon is running on memory alone, and the journal says why:
+It prints the state directory, socket, entry count and persistence mode (`durable`, `volatile` or
+`unavailable`), then exits 0 or 1 without starting the daemon. This checks stored history and
+configuration; it does not connect to a running daemon or check Wayland availability. Invalid
+arguments exit 2.
 
-```bash
-journalctl --user -u sysc-clipboard
-```
+| Flag | Meaning |
+|---|---|
+| `--check` | Print state and exit |
+| `--key-file <path>` | Use a key file instead of the Secret Service |
+| `--state-dir <path>` | Override the state directory (must be absolute) |
 
-## Key and state
-
-On first start the daemon creates a random 32-byte key and stores it in your keyring as
-`sysc-clipboard encryption key`. After that it reads the same key back on every start.
-
-If your keyring is locked, or there is no Secret Service at all, history still works but only lives in
-memory until the daemon stops. For headless sessions, use a key file instead:
-
-```bash
-sysc-clipboard --key-file ~/.config/sysc-clipboard/clipboard.key
-```
-
-The daemon creates that file with mode `0600` inside a `0700` directory. If the file already exists it
-must hold exactly 32 bytes and have those permissions, or the daemon refuses it.
-
-State lives in `$XDG_STATE_HOME/sysc-clipboard`, or `~/.local/state/sysc-clipboard` when
-`XDG_STATE_HOME` is unset. Pass `--state-dir` with an absolute path to put it somewhere else.
+The state directory is `$XDG_STATE_HOME/sysc-clipboard`, falling back to
+`~/.local/state/sysc-clipboard`.
 
 ## Clients
 
-Clients connect to `$XDG_RUNTIME_DIR/sysc-clipboard/control.v1.sock`. The socket and its directory
-are private to your user. The protocol carries metadata, previews and thumbnails, plus restore, pin,
-delete and clear requests. Go clients can use the versioned `client` package:
+Run inside an existing Go module:
 
 ```bash
 go get github.com/Nomadcxx/sysc-clipboard/client
 ```
 
-sysc-shell connects as a client. It does not start or supervise the daemon, so run the user service
-above.
+The client package offers `Restore`, `Pin`, `Delete`, `Clear`, `Thumbnail` and `Resync`, plus an
+`Updates()` stream of snapshots and deltas.
 
-Primary selection (middle-click paste) is not captured.
+## Documentation
 
-Selections a password manager marks as secret (the `x-kde-passwordManagerHint` type, set by KeePassXC,
-Bitwarden and others) are never recorded.
-
-## Development
-
-```bash
-gofmt -l .
-go vet ./...
-go test -race -count=1 ./...
-```
-
-The Secret Service test runs a private `dbus-daemon` and skips itself when `dbus-daemon` is not
-installed.
+- [The sysc ecosystem](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/ecosystem.md)
+- [sysc-shell](https://github.com/Nomadcxx/sysc-shell) — the shell that draws the clipboard panel
 
 ## License
 
-BSD-3-Clause
+BSD-3-Clause.
 
 ---
 
