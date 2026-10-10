@@ -23,7 +23,28 @@ clipboard selections; sysc-shell draws the history panel.
 
 ### Requirements
 
-Go 1.26+, a compositor with data-control, and a Secret Service provider (or `--key-file`).
+A compositor with data-control and a Secret Service provider (or `--key-file`).
+Source builds need Go 1.26+.
+
+### Guided installer (recommended)
+
+Use the [SYSC Go installer](https://github.com/Nomadcxx/sysc#install) to set up
+the shell, its companions and your Niri session together.
+
+### AUR
+
+On Arch, install [sysc-clipboard](https://aur.archlinux.org/packages/sysc-clipboard) with
+your AUR helper:
+
+```sh
+yay -S sysc-clipboard
+systemctl --user enable --now sysc-clipboard.service
+```
+
+Encrypted persistence needs a running Secret Service provider, such as
+gnome-keyring or KeePassXC, or a configured `--key-file`.
+
+[Documentation](https://nomadcxx.github.io/sysc/docs/).
 
 ### From source
 
@@ -41,7 +62,7 @@ GOBIN="$HOME/.local/bin" go install github.com/Nomadcxx/sysc-clipboard/cmd/sysc-
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### As a user service
+### Source builds: user service
 
 ```bash
 install -Dm644 contrib/sysc-clipboard.service ~/.config/systemd/user/sysc-clipboard.service
