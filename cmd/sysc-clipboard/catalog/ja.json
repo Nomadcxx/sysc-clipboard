@@ -1,0 +1,8 @@
+{
+ "check persistence and runtime configuration, then exit": "永続化と実行時設定を確認して終了",
+ "clipboard state directory": "クリップボード状態ディレクトリ",
+ "clipboard state directory must be absolute": "クリップボード状態ディレクトリは絶対パスである必要があります",
+ "dropped %d unreadable clipboard entries": "読み取れないクリップボード項目 %d 件を破棄しました",
+ "unexpected argument %q": "予期しない引数 %q",
+ "use a private 32-byte key file instead of Secret Service": "Secret Service の代わりに 32 バイトの秘密鍵ファイルを使用"
+}
