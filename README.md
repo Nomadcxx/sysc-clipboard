@@ -1,10 +1,16 @@
-![sysc-clipboard](assets/wordmark.png)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark.png">
+    <img src="assets/wordmark-light.png" alt="sysc-clipboard" height="64">
+  </picture>
+</p>
 
 Clipboard history for sysc-shell, with encrypted storage and a Go client. Captures Wayland
 clipboard selections; sysc-shell draws the history panel.
 
 ## Quick Links
 
+- [Documentation site](https://nomadcxx.github.io/sysc/docs/components/sysc-clipboard/)
 - [Documentation](#documentation)
 - [The sysc ecosystem](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/ecosystem.md)
 
