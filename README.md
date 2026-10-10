@@ -8,6 +8,11 @@
 Clipboard history for sysc-shell, with encrypted storage and a Go client. Captures Wayland
 clipboard selections; sysc-shell draws the history panel.
 
+<p align="center">
+  <img src="assets/panel.png" alt="The sysc-shell clipboard history panel listing six entries, one pinned" width="640"><br>
+  <sub>The sysc-shell clipboard panel, fed by sysc-clipboard (fixture data).</sub>
+</p>
+
 ## Quick Links
 
 - [Documentation site](https://nomadcxx.github.io/sysc/docs/components/sysc-clipboard/)
