@@ -170,11 +170,11 @@ func runDaemon(parent context.Context, state runtimeState, logger *log.Logger) e
 		Store:       state.store,
 		Persistence: state.persistence,
 		Wayland:     protocol.WaylandUnavailable,
-		Restore: func(item history.Item) error {
+		Restore: func(ctx context.Context, item history.Item) error {
 			if owner == nil {
 				return daemon.ErrRestoreUnavailable
 			}
-			return owner.Restore(item)
+			return owner.Restore(ctx, item)
 		},
 	})
 	defer service.Close()

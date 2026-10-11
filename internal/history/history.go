@@ -53,6 +53,11 @@ func (item Item) Payload() []byte {
 	return bytes.Clone(item.payload)
 }
 
+// PayloadReader exposes immutable payload bytes without copying them.
+func (item Item) PayloadReader() *bytes.Reader {
+	return bytes.NewReader(item.payload)
+}
+
 func NewItem(metadata protocol.Entry, payload []byte) (Item, error) {
 	if err := protocol.ValidateEntry(metadata); err != nil {
 		return Item{}, fmt.Errorf("%w: %v", ErrInvalidCapture, err)
@@ -325,6 +330,25 @@ func (history *History) Item(id string) (Item, bool) {
 	}
 	entry := history.entries[index]
 	return Item{metadata: cloneEntry(entry.metadata), payload: bytes.Clone(entry.payload)}, true
+}
+
+// ItemView snapshots metadata and shares the immutable payload for read-only work.
+func (history *History) ItemView(id string) (Item, bool) {
+	index := history.indexOf(id)
+	if index < 0 {
+		return Item{}, false
+	}
+	entry := history.entries[index]
+	return Item{metadata: cloneEntry(entry.metadata), payload: entry.payload}, true
+}
+
+// Metadata returns one entry without copying its payload.
+func (history *History) Metadata(id string) (protocol.Entry, bool) {
+	index := history.indexOf(id)
+	if index < 0 {
+		return protocol.Entry{}, false
+	}
+	return cloneEntry(history.entries[index].metadata), true
 }
 
 func (history *History) indexOf(id string) int {

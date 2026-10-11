@@ -480,7 +480,7 @@ func TestOwnerRestoreKeepsSourceUntilCancellation(t *testing.T) {
 	backend := newFakeBackend()
 	owner := runTestOwner(t, backend, OwnerOptions{})
 
-	if err := owner.Restore(item); err != nil {
+	if err := owner.Restore(context.Background(), item); err != nil {
 		t.Fatal(err)
 	}
 	if got := backend.manager.sourceCount(); got != 1 {
@@ -522,7 +522,7 @@ func TestOwnerRestoresOnlyAfterDeletedOfferIsAcknowledged(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := owner.Restore(itemHistory.Items()[0]); err != nil {
+	if err := owner.Restore(context.Background(), itemHistory.Items()[0]); err != nil {
 		t.Fatal(err)
 	}
 	if backend.roundtripCount <= before {
@@ -570,7 +570,7 @@ func TestOwnerReadAndWriteWorkersAreBoundedAndComplete(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := owner.Restore(itemHistory.Items()[0]); err != nil {
+	if err := owner.Restore(context.Background(), itemHistory.Items()[0]); err != nil {
 		t.Fatal(err)
 	}
 	source := backend.manager.source(1)
