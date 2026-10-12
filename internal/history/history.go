@@ -53,9 +53,10 @@ func (item Item) Payload() []byte {
 	return bytes.Clone(item.payload)
 }
 
-// PayloadReader exposes immutable payload bytes without copying them.
-func (item Item) PayloadReader() *bytes.Reader {
-	return bytes.NewReader(item.payload)
+// PayloadView exposes the immutable payload bytes without copying them. The
+// slice must not be modified, and must not outlive the owning Item's use.
+func (item Item) PayloadView() []byte {
+	return item.payload
 }
 
 func NewItem(metadata protocol.Entry, payload []byte) (Item, error) {

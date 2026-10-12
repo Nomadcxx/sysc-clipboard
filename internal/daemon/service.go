@@ -23,6 +23,7 @@ import (
 var (
 	ErrServiceClosed        = errors.New("clipboard service is closed")
 	ErrRestoreUnavailable   = errors.New("clipboard restore is unavailable")
+	ErrRestoreNotStarted    = errors.New("clipboard restore worker was busy")
 	ErrInvalidWaylandState  = errors.New("invalid clipboard Wayland state")
 	ErrThumbnailUnsupported = errors.New("clipboard thumbnail is unsupported")
 	ErrThumbnailLimit       = errors.New("clipboard thumbnail exceeds a limit")
@@ -31,8 +32,12 @@ var (
 const (
 	maxDecodedPixels = 16 << 20
 	serviceQueueSize = 4
-	// ponytail: one active and one queued decode bounds image work; raise only after measuring peak decode memory.
-	thumbnailQueueSize       = 1
+	// One decode runs at a time. Callers queue in the reducer instead of
+	// failing, so this only bounds concurrent image work, not throughput.
+	thumbnailQueueSize = 1
+	// ponytail: pending jobs are entry views sharing an immutable payload, so
+	// this is a latency bound, not a memory bound. Raise if a real client bursts.
+	maxPendingThumbnails     = 64
 	restoreTimeout           = 5 * time.Second
 	maxThumbnailCacheBytes   = 8 << 20
 	maxThumbnailCacheEntries = 64
@@ -130,6 +135,7 @@ type restoreResult struct {
 	id        uint64
 	ctx       context.Context
 	requestID string
+	started   bool
 	err       error
 	reply     chan serviceReply
 }
@@ -380,7 +386,8 @@ func (service *Service) runRestoreWorker() {
 				return
 			}
 			err := job.ctx.Err()
-			if err == nil {
+			started := err == nil
+			if started {
 				stop := context.AfterFunc(service.ctx, job.cancel)
 				err = service.restore(job.ctx, job.item)
 				stop()
@@ -389,7 +396,8 @@ func (service *Service) runRestoreWorker() {
 				}
 			}
 			result := restoreResult{
-				id: job.id, ctx: job.ctx, requestID: job.requestID, err: err, reply: job.reply,
+				id: job.id, ctx: job.ctx, requestID: job.requestID,
+				started: started, err: err, reply: job.reply,
 			}
 			select {
 			case service.restoreResults <- result:
@@ -461,7 +469,7 @@ func (service *Service) run(options Options) {
 				request.reply <- serviceReply{}
 			}
 		case result := <-service.thumbnailResults:
-			state.completeThumbnail(result)
+			state.completeThumbnail(service, result)
 		case result := <-service.restoreResults:
 			state.completeRestore(result)
 		}
@@ -476,6 +484,8 @@ type reducerState struct {
 	revision           uint64
 	subscribers        map[uint64]*Subscription
 	thumbnails         *thumbnailCache
+	pendingThumbnails  []thumbnailJob
+	thumbnailBusy      bool
 	nextSubscriptionID uint64
 	nextRestoreID      uint64
 	pendingRestores    map[uint64]pendingRestore
@@ -547,14 +557,39 @@ func (state *reducerState) requestThumbnail(service *Service, request serviceReq
 		ctx: ctx, requestID: message.RequestID, maxPX: message.MaxPX,
 		identity: identity, item: item, reply: request.reply,
 	}
+	if len(state.pendingThumbnails) >= maxPendingThumbnails {
+		request.reply <- serviceReply{message: errorMessage(message.RequestID, protocol.ErrorUnavailable, "clipboard thumbnail queue is full")}
+		return
+	}
+	state.pendingThumbnails = append(state.pendingThumbnails, job)
+	state.dispatchThumbnail(service)
+}
+
+// dispatchThumbnail hands the worker at most one job so a burst of callers
+// waits instead of failing. Queued jobs are entry views that share the
+// immutable payload, so depth costs no copies.
+func (state *reducerState) dispatchThumbnail(service *Service) {
+	if state.thumbnailBusy || len(state.pendingThumbnails) == 0 {
+		return
+	}
+	job := state.pendingThumbnails[0]
+	if job.ctx.Err() != nil {
+		state.pendingThumbnails = state.pendingThumbnails[1:]
+		state.dispatchThumbnail(service)
+		return
+	}
 	select {
 	case service.thumbnailJobs <- job:
+		state.pendingThumbnails = state.pendingThumbnails[1:]
+		state.thumbnailBusy = true
 	default:
-		request.reply <- serviceReply{message: errorMessage(message.RequestID, protocol.ErrorUnavailable, "clipboard thumbnail worker is busy")}
+		// The worker is still handing back the previous job. It stays queued.
 	}
 }
 
-func (state *reducerState) completeThumbnail(result thumbnailResult) {
+func (state *reducerState) completeThumbnail(service *Service, result thumbnailResult) {
+	state.thumbnailBusy = false
+	defer state.dispatchThumbnail(service)
 	if result.ctx.Err() != nil {
 		return
 	}
@@ -583,6 +618,11 @@ func (state *reducerState) completeRestore(result restoreResult) {
 	}
 	pending.cancel()
 	if result.err != nil {
+		// A job whose deadline expired in the queue never reached the Wayland
+		// owner, so reporting its context error would blame the clipboard.
+		if !result.started {
+			result.err = fmt.Errorf("%w: %v", ErrRestoreNotStarted, result.err)
+		}
 		result.reply <- serviceReply{message: errorMessage(result.requestID, protocol.ErrorUnavailable, boundedError(result.err))}
 		return
 	}
@@ -914,14 +954,14 @@ func makeThumbnail(item history.Item, maxPX uint16) (protocol.Thumbnail, error) 
 	default:
 		return protocol.Thumbnail{}, ErrThumbnailUnsupported
 	}
-	config, _, err := image.DecodeConfig(item.PayloadReader())
+	config, _, err := image.DecodeConfig(bytes.NewReader(item.PayloadView()))
 	if err != nil || config.Width <= 0 || config.Height <= 0 {
 		return protocol.Thumbnail{}, ErrThumbnailUnsupported
 	}
 	if int64(config.Width)*int64(config.Height) > maxDecodedPixels {
 		return protocol.Thumbnail{}, ErrThumbnailLimit
 	}
-	decoded, _, err := image.Decode(item.PayloadReader())
+	decoded, _, err := image.Decode(bytes.NewReader(item.PayloadView()))
 	if err != nil {
 		return protocol.Thumbnail{}, ErrThumbnailUnsupported
 	}

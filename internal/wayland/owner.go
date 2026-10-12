@@ -364,7 +364,9 @@ func (owner *Owner) Restore(ctx context.Context, item history.Item) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	valid, err := history.NewItem(item.Metadata(), item.Payload())
+	// NewItem hashes and takes the one copy the offer path owns, so the source
+	// can hold it for its whole lifetime without copying it again.
+	valid, err := history.NewItem(item.Metadata(), item.PayloadView())
 	if err != nil {
 		return err
 	}
@@ -384,7 +386,7 @@ func (owner *Owner) Restore(ctx context.Context, item history.Item) error {
 	}
 
 	reply := make(chan error, 1)
-	request := ownerCommand{ctx: ctx, metadata: valid.Metadata(), payload: valid.Payload(), reply: reply}
+	request := ownerCommand{ctx: ctx, metadata: valid.Metadata(), payload: valid.PayloadView(), reply: reply}
 	select {
 	case owner.commands <- request:
 	case <-owner.done:
