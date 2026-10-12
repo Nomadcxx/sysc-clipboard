@@ -10,6 +10,8 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -538,12 +540,9 @@ func TestThumbnailWorkLeavesReducerResponsiveAndRejectsStaleResults(t *testing.T
 	second := enqueueServiceCommand(t, svc, protocol.Message{
 		Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-queued", ID: id, MaxPX: 1,
 	})
-	busy := waitServiceReply(t, enqueueServiceCommand(t, svc, protocol.Message{
+	third := enqueueServiceCommand(t, svc, protocol.Message{
 		Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-overflow", ID: id, MaxPX: 1,
-	}))
-	if busy.message.Type != protocol.TypeError || busy.message.Error == nil || busy.message.Error.Code != protocol.ErrorUnavailable {
-		t.Fatalf("overflow thumbnail response = %+v, want unavailable", busy.message)
-	}
+	})
 	deleted := svc.Execute(context.Background(), protocol.Message{
 		Version: protocol.Version, Type: protocol.TypeDelete, RequestID: "delete-during-thumbnail", ID: id,
 	})
@@ -553,11 +552,129 @@ func TestThumbnailWorkLeavesReducerResponsiveAndRejectsStaleResults(t *testing.T
 
 	close(release)
 	released = true
-	for label, reply := range map[string]<-chan serviceReply{"active": first, "queued": second} {
+	// A burst queues behind the single worker instead of failing, and every
+	// completion is rejected because the item was deleted mid-flight.
+	for label, reply := range map[string]<-chan serviceReply{"active": first, "queued": second, "overflow": third} {
 		response := waitServiceReply(t, reply).message
 		if response.Type != protocol.TypeError || response.Error == nil || response.Error.Code != protocol.ErrorNotFound {
 			t.Fatalf("%s stale thumbnail response = %+v, want not found", label, response)
 		}
+	}
+}
+
+// A burst larger than the worker depth must queue, not fail: a history UI asks
+// for a whole screen of thumbnails at once.
+func TestThumbnailBurstQueuesInsteadOfFailing(t *testing.T) {
+	const burst = 8
+	historyState := history.New(1)
+	ids := make([]string, 0, burst)
+	for index := 0; index < burst; index++ {
+		changes, err := historyState.Capture(imageCapture(byte(index)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, changes[0].ID)
+	}
+	if len(ids) != burst {
+		t.Fatalf("captured %d distinct entries, want %d", len(ids), burst)
+	}
+	svc := newTestService(t, historyState)
+
+	responses := make([]protocol.Message, burst)
+	var group sync.WaitGroup
+	group.Add(burst)
+	for index, id := range ids {
+		go func() {
+			defer group.Done()
+			responses[index] = svc.Execute(context.Background(), protocol.Message{
+				Version: protocol.Version, Type: protocol.TypeThumbnail,
+				RequestID: fmt.Sprintf("burst-%d", index), ID: id, MaxPX: 1,
+			})
+		}()
+	}
+	group.Wait()
+	for index, response := range responses {
+		if response.Type != protocol.TypeThumbnail || response.Thumbnail == nil {
+			t.Fatalf("burst thumbnail %d response = %+v, want thumbnail", index, response)
+		}
+		if response.Thumbnail.ID != ids[index] {
+			t.Fatalf("burst thumbnail %d id = %q, want %q", index, response.Thumbnail.ID, ids[index])
+		}
+	}
+}
+
+// Queueing must not become unbounded: past the cap the reducer still sheds.
+func TestThumbnailPendingQueueIsCapped(t *testing.T) {
+	historyState := history.New(1)
+	changes, err := historyState.Capture(imageCapture(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := changes[0].ID
+	svc := newTestService(t, historyState)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	svc.thumbnailize = func(item history.Item, _ uint16) (protocol.Thumbnail, error) {
+		<-release
+		return makeThumbnail(item, 1)
+	}
+
+	// The first request occupies the worker, so request n leaves n-1 queued.
+	for index := 1; index <= maxPendingThumbnails+1; index++ {
+		enqueueServiceCommand(t, svc, protocol.Message{
+			Version: protocol.Version, Type: protocol.TypeThumbnail,
+			RequestID: fmt.Sprintf("cap-%d", index), ID: id, MaxPX: 1,
+		})
+	}
+	over := waitServiceReply(t, enqueueServiceCommand(t, svc, protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "cap-over", ID: id, MaxPX: 1,
+	}))
+	if over.message.Type != protocol.TypeError || over.message.Error == nil || over.message.Error.Code != protocol.ErrorUnavailable {
+		t.Fatalf("capped thumbnail response = %+v, want unavailable", over.message)
+	}
+	close(release)
+	released = true
+}
+
+// A restore that expired while queued never reached the Wayland owner, so it
+// must not report the context error as if the clipboard had refused it.
+func TestRestoreThatExpiredInQueueReportsNotStarted(t *testing.T) {
+	state := &reducerState{pendingRestores: map[uint64]pendingRestore{}}
+	reply := make(chan serviceReply, 1)
+	state.pendingRestores[1] = pendingRestore{itemID: "id", cancel: func() {}}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	state.completeRestore(restoreResult{
+		id: 1, ctx: expired, requestID: "restore-expired",
+		started: false, err: context.DeadlineExceeded, reply: reply,
+	})
+	message := (<-reply).message
+	if message.Type != protocol.TypeError || message.Error == nil || !strings.Contains(message.Error.Message, ErrRestoreNotStarted.Error()) {
+		t.Fatalf("expired restore response = %+v, want %v", message, ErrRestoreNotStarted)
+	}
+	if len(state.pendingRestores) != 0 {
+		t.Fatalf("pendingRestores = %d, want drained", len(state.pendingRestores))
+	}
+}
+
+// imageCapture encodes a 1x1 PNG whose only pixel varies, so each capture is a
+// distinct entry.
+func imageCapture(seed byte) history.Capture {
+	decoded := image.NewGray(image.Rect(0, 0, 1, 1))
+	decoded.SetGray(0, 0, color.Gray{Y: seed})
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, decoded); err != nil {
+		panic(err)
+	}
+	return history.Capture{
+		Generation: 1, Kind: protocol.KindImage, MIME: "image/png",
+		Payload: encoded.Bytes(), CapturedAt: time.Unix(int64(seed), 0),
 	}
 }
 

@@ -86,7 +86,7 @@ func (store *Store) Save(items []history.Item) error {
 	for _, item := range items {
 		metadata := item.Metadata()
 		// ponytail: history.Item payloads are immutable and hash-checked at construction; rehashing unchanged bytes only repeats that work.
-		if uint64(item.PayloadReader().Size()) != metadata.Size {
+		if uint64(len(item.PayloadView())) != metadata.Size {
 			return fmt.Errorf("%w: payload size does not match metadata", history.ErrInvalidCapture)
 		}
 		if _, ok := seen[metadata.ID]; ok {
@@ -141,10 +141,8 @@ func (store *Store) Save(items []history.Item) error {
 			return fmt.Errorf("inspect clipboard payload file: %w", statErr)
 		}
 
-		payload, err := io.ReadAll(item.PayloadReader())
-		if err != nil {
-			return fmt.Errorf("read clipboard payload: %w", err)
-		}
+		// seal only reads the plaintext, so the shared view is handed over directly.
+		payload := item.PayloadView()
 		sealed, err := seal(store.key, payloadPurpose, metadata.ID, payload)
 		if err != nil {
 			return err
