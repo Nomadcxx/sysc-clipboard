@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -92,7 +93,7 @@ func TestServiceCommandsRestorePinDeleteAndClear(t *testing.T) {
 	var restored string
 	svc := NewService(Options{
 		History: history.New(1),
-		Restore: func(item history.Item) error {
+		Restore: func(_ context.Context, item history.Item) error {
 			restored = item.Metadata().ID
 			return nil
 		},
@@ -177,6 +178,131 @@ func TestServiceCommandsRestorePinDeleteAndClear(t *testing.T) {
 	allDelta := nextMessage(t, sub.Updates)
 	if allDelta.Delta == nil || len(allDelta.Delta.Changes) != 1 || allDelta.Delta.Changes[0].ID != oldestID {
 		t.Fatalf("clear-all delta = %+v", allDelta)
+	}
+}
+
+func TestRestoreDoesNotBlockReducerSnapshot(t *testing.T) {
+	historyState := history.New(1)
+	if _, err := historyState.Capture(textCapture(1, "restore target", time.Unix(10, 0))); err != nil {
+		t.Fatal(err)
+	}
+	id := historyState.Snapshot()[0].ID
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	svc := NewService(Options{
+		History:     historyState,
+		Persistence: protocol.PersistenceUnavailable,
+		Wayland:     protocol.WaylandReady,
+		Restore: func(context.Context, history.Item) error {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		},
+	})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+		svc.Close()
+	}()
+
+	restoreDone := make(chan protocol.Message, 1)
+	go func() {
+		restoreDone <- svc.Execute(context.Background(), protocol.Message{
+			Version: protocol.Version, Type: protocol.TypeRestore, RequestID: "restore-blocked", ID: id,
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("restore callback did not start")
+	}
+
+	snapshotCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := svc.CurrentSnapshot(snapshotCtx); err != nil {
+		t.Fatalf("snapshot blocked behind restore: %v", err)
+	}
+
+	queued := make([]<-chan serviceReply, 0, serviceQueueSize)
+	for index := 0; index < serviceQueueSize; index++ {
+		queued = append(queued, enqueueServiceCommand(t, svc, protocol.Message{
+			Version: protocol.Version, Type: protocol.TypeRestore,
+			RequestID: fmt.Sprintf("restore-queued-%d", index), ID: id,
+		}))
+	}
+	busy := waitServiceReply(t, enqueueServiceCommand(t, svc, protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeRestore, RequestID: "restore-overflow", ID: id,
+	}))
+	if busy.message.Type != protocol.TypeError || busy.message.Error == nil || busy.message.Error.Code != protocol.ErrorUnavailable {
+		t.Fatalf("overflow restore response = %+v, want unavailable", busy.message)
+	}
+
+	close(release)
+	released = true
+	select {
+	case response := <-restoreDone:
+		if response.Type != protocol.TypeAck || response.Ack == nil || response.Ack.RequestID != "restore-blocked" {
+			t.Fatalf("restore response = %+v", response)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restore did not complete")
+	}
+	for index, reply := range queued {
+		if response := waitServiceReply(t, reply).message; response.Type != protocol.TypeAck {
+			t.Fatalf("queued restore %d response = %+v", index, response)
+		}
+	}
+}
+
+func TestRestoreCancellationReachesWorker(t *testing.T) {
+	historyState := history.New(1)
+	if _, err := historyState.Capture(textCapture(1, "restore target", time.Unix(10, 0))); err != nil {
+		t.Fatal(err)
+	}
+	id := historyState.Snapshot()[0].ID
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	svc := NewService(Options{
+		History:     historyState,
+		Persistence: protocol.PersistenceUnavailable,
+		Wayland:     protocol.WaylandReady,
+		Restore: func(ctx context.Context, _ history.Item) error {
+			close(started)
+			<-ctx.Done()
+			close(cancelled)
+			return ctx.Err()
+		},
+	})
+	t.Cleanup(svc.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan protocol.Message, 1)
+	go func() {
+		done <- svc.Execute(ctx, protocol.Message{
+			Version: protocol.Version, Type: protocol.TypeRestore, RequestID: "restore-cancelled", ID: id,
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("restore callback did not start")
+	}
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("restore callback did not receive cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled restore did not return")
 	}
 }
 
@@ -309,6 +435,11 @@ func TestServiceSetGenerationRejectsOlderCaptureWithoutPublishing(t *testing.T) 
 
 func TestServiceThumbnailIsBoundedPNGAndRejectsText(t *testing.T) {
 	svc := newTestService(t, history.New(1))
+	thumbnailizeCalls := 0
+	svc.thumbnailize = func(item history.Item, maxPX uint16) (protocol.Thumbnail, error) {
+		thumbnailizeCalls++
+		return makeThumbnail(item, maxPX)
+	}
 	sub, err := svc.Subscribe(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -343,6 +474,14 @@ func TestServiceThumbnailIsBoundedPNGAndRejectsText(t *testing.T) {
 	if response.Thumbnail.Width != 1 || response.Thumbnail.Height != 1 || len(response.Thumbnail.Data) == 0 {
 		t.Fatalf("thumbnail = %+v", response.Thumbnail)
 	}
+	response = svc.Execute(context.Background(), protocol.Message{Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-cached", ID: id, MaxPX: 1})
+	if response.Type != protocol.TypeThumbnail || response.Thumbnail == nil || thumbnailizeCalls != 1 {
+		t.Fatalf("cached thumbnail response = %+v, thumbnailize calls = %d", response, thumbnailizeCalls)
+	}
+	response = svc.Execute(context.Background(), protocol.Message{Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-larger", ID: id, MaxPX: 2})
+	if response.Type != protocol.TypeThumbnail || response.Thumbnail == nil || response.Thumbnail.Width != 2 || thumbnailizeCalls != 2 {
+		t.Fatalf("size-specific thumbnail response = %+v, thumbnailize calls = %d", response, thumbnailizeCalls)
+	}
 
 	if err := svc.Capture(context.Background(), textCapture(1, "text", time.Unix(50, 0))); err != nil {
 		t.Fatal(err)
@@ -351,6 +490,105 @@ func TestServiceThumbnailIsBoundedPNGAndRejectsText(t *testing.T) {
 	textResponse := svc.Execute(context.Background(), protocol.Message{Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-2", ID: textID, MaxPX: 1})
 	if textResponse.Type != protocol.TypeError || textResponse.Error == nil || textResponse.Error.Code != protocol.ErrorUnsupported {
 		t.Fatalf("text thumbnail response = %+v", textResponse)
+	}
+}
+
+func TestThumbnailWorkLeavesReducerResponsiveAndRejectsStaleResults(t *testing.T) {
+	historyState := history.New(1)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := historyState.Capture(history.Capture{
+		Generation: 1, Kind: protocol.KindImage, MIME: "image/png", Payload: encoded.Bytes(), CapturedAt: time.Unix(30, 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := changes[0].ID
+	svc := newTestService(t, historyState)
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	svc.thumbnailize = func(item history.Item, _ uint16) (protocol.Thumbnail, error) {
+		started <- struct{}{}
+		<-release
+		return protocol.Thumbnail{ID: item.Metadata().ID, MIME: "image/png", Width: 1, Height: 1, Data: []byte{1}}, nil
+	}
+
+	first := enqueueServiceCommand(t, svc, protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-held", ID: id, MaxPX: 1,
+	})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("thumbnail worker did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := svc.CurrentSnapshot(ctx); err != nil {
+		t.Fatalf("snapshot blocked behind thumbnail: %v", err)
+	}
+
+	second := enqueueServiceCommand(t, svc, protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-queued", ID: id, MaxPX: 1,
+	})
+	busy := waitServiceReply(t, enqueueServiceCommand(t, svc, protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-overflow", ID: id, MaxPX: 1,
+	}))
+	if busy.message.Type != protocol.TypeError || busy.message.Error == nil || busy.message.Error.Code != protocol.ErrorUnavailable {
+		t.Fatalf("overflow thumbnail response = %+v, want unavailable", busy.message)
+	}
+	deleted := svc.Execute(context.Background(), protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeDelete, RequestID: "delete-during-thumbnail", ID: id,
+	})
+	if deleted.Type != protocol.TypeAck {
+		t.Fatalf("delete during thumbnail = %+v", deleted)
+	}
+
+	close(release)
+	released = true
+	for label, reply := range map[string]<-chan serviceReply{"active": first, "queued": second} {
+		response := waitServiceReply(t, reply).message
+		if response.Type != protocol.TypeError || response.Error == nil || response.Error.Code != protocol.ErrorNotFound {
+			t.Fatalf("%s stale thumbnail response = %+v, want not found", label, response)
+		}
+	}
+}
+
+func TestThumbnailCacheBoundsEntriesAndBytes(t *testing.T) {
+	cache := newThumbnailCache()
+	for index := 0; index < maxThumbnailCacheEntries+1; index++ {
+		id := fmt.Sprintf("entry-%d", index)
+		identity := protocol.Entry{ID: id, Kind: protocol.KindImage, MIME: "image/png", Size: 1, SHA256: id}
+		cache.put(thumbnailKey{id: id, maxPX: 1}, identity, protocol.Thumbnail{Data: []byte{1}})
+	}
+	if len(cache.entries) != maxThumbnailCacheEntries {
+		t.Fatalf("cache entries = %d, want %d", len(cache.entries), maxThumbnailCacheEntries)
+	}
+	if _, ok := cache.get(thumbnailKey{id: "entry-0", maxPX: 1}, protocol.Entry{ID: "entry-0", Kind: protocol.KindImage, MIME: "image/png", Size: 1, SHA256: "entry-0"}); ok {
+		t.Fatal("cache retained its oldest entry after reaching the entry limit")
+	}
+
+	cache = newThumbnailCache()
+	for index := 0; index < 3; index++ {
+		id := fmt.Sprintf("large-%d", index)
+		identity := protocol.Entry{ID: id, Kind: protocol.KindImage, MIME: "image/png", Size: 1, SHA256: id}
+		cache.put(thumbnailKey{id: id, maxPX: 1}, identity, protocol.Thumbnail{Data: make([]byte, maxThumbnailCacheBytes/2)})
+	}
+	if cache.bytes > maxThumbnailCacheBytes || len(cache.entries) != 2 {
+		t.Fatalf("byte-bounded cache has %d entries and %d bytes", len(cache.entries), cache.bytes)
+	}
+	oldIdentity := protocol.Entry{ID: "large-1", Kind: protocol.KindImage, MIME: "image/png", Size: 1, SHA256: "large-1"}
+	changedIdentity := oldIdentity
+	changedIdentity.SHA256 = "changed"
+	if _, ok := cache.get(thumbnailKey{id: "large-1", maxPX: 1}, changedIdentity); ok {
+		t.Fatal("cache returned a thumbnail for a changed entry identity")
 	}
 }
 
@@ -363,6 +601,32 @@ func newTestService(t *testing.T, h *history.History) *Service {
 	})
 	t.Cleanup(svc.Close)
 	return svc
+}
+
+func enqueueServiceCommand(t *testing.T, svc *Service, message protocol.Message) <-chan serviceReply {
+	t.Helper()
+	ctx := context.Background()
+	reply := make(chan serviceReply, 1)
+	if err := svc.submitRequest(ctx, serviceRequest{kind: requestCommand, ctx: ctx, message: message, reply: reply}); err != nil {
+		t.Fatal(err)
+	}
+	barrierCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := svc.CurrentSnapshot(barrierCtx); err != nil {
+		t.Fatalf("wait for command dispatch: %v", err)
+	}
+	return reply
+}
+
+func waitServiceReply(t *testing.T, reply <-chan serviceReply) serviceReply {
+	t.Helper()
+	select {
+	case result := <-reply:
+		return result
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for service reply")
+		return serviceReply{}
+	}
 }
 
 func textCapture(generation uint64, value string, capturedAt time.Time) history.Capture {

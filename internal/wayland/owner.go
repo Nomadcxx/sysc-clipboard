@@ -150,8 +150,10 @@ type Owner struct {
 }
 
 type ownerCommand struct {
-	item  history.Item
-	reply chan error
+	ctx      context.Context
+	metadata protocol.Entry
+	payload  []byte
+	reply    chan error
 }
 
 type offerState struct {
@@ -326,7 +328,11 @@ func (owner *Owner) processCommandOrResult(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case command := <-owner.commands:
-		command.reply <- owner.restore(command.item)
+		err := command.ctx.Err()
+		if err == nil {
+			err = owner.restore(command.metadata, command.payload)
+		}
+		command.reply <- err
 	case result := <-owner.readResults:
 		owner.handleReadResult(result)
 	default:
@@ -351,9 +357,12 @@ func (owner *Owner) publishWayland(state protocol.WaylandState) {
 	}
 }
 
-func (owner *Owner) Restore(item history.Item) error {
+func (owner *Owner) Restore(ctx context.Context, item history.Item) error {
 	if owner.backend == nil {
 		return ErrOwnerUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	valid, err := history.NewItem(item.Metadata(), item.Payload())
 	if err != nil {
@@ -363,25 +372,33 @@ func (owner *Owner) Restore(item history.Item) error {
 	case <-owner.started:
 	case <-owner.done:
 		return ErrOwnerUnavailable
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	select {
 	case <-owner.ready:
 	case <-owner.done:
 		return ErrOwnerUnavailable
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 
 	reply := make(chan error, 1)
-	request := ownerCommand{item: valid, reply: reply}
+	request := ownerCommand{ctx: ctx, metadata: valid.Metadata(), payload: valid.Payload(), reply: reply}
 	select {
 	case owner.commands <- request:
 	case <-owner.done:
 		return ErrOwnerUnavailable
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	select {
 	case err := <-reply:
 		return err
 	case <-owner.done:
 		return ErrOwnerUnavailable
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -580,12 +597,10 @@ func (owner *Owner) acceptPayload(result readResult) {
 
 func (owner *Owner) handleFinished() { owner.finished = ErrOwnerFinished }
 
-func (owner *Owner) restore(item history.Item) error {
+func (owner *Owner) restore(metadata protocol.Entry, payload []byte) error {
 	if owner.manager == nil || owner.device == nil || owner.finished != nil {
 		return ErrOwnerUnavailable
 	}
-	metadata := item.Metadata()
-	payload := item.Payload()
 	return owner.offerPayload(metadata.Kind, metadata.MIME, payload)
 }
 
