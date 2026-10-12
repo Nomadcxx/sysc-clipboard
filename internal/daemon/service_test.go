@@ -562,6 +562,63 @@ func TestThumbnailWorkLeavesReducerResponsiveAndRejectsStaleResults(t *testing.T
 	}
 }
 
+func TestCanceledThumbnailDoesNotStallQueue(t *testing.T) {
+	historyState := history.New(1)
+	changes, err := historyState.Capture(imageCapture(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := changes[0].ID
+	svc := newTestService(t, historyState)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	svc.thumbnailize = func(item history.Item, _ uint16) (protocol.Thumbnail, error) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-release
+		return protocol.Thumbnail{ID: item.Metadata().ID, MIME: "image/png", Width: 1, Height: 1, Data: []byte{1}}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	firstReply := make(chan serviceReply, 1)
+	if err := svc.submitRequest(ctx, serviceRequest{
+		kind: requestCommand, ctx: ctx,
+		message: protocol.Message{Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-canceled", ID: id, MaxPX: 1},
+		reply:   firstReply,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CurrentSnapshot(context.Background()); err != nil {
+		t.Fatalf("wait for first thumbnail dispatch: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("thumbnail worker did not start")
+	}
+
+	cancel()
+	close(release)
+	released = true
+	second := enqueueServiceCommand(t, svc, protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeThumbnail, RequestID: "thumb-after-cancel", ID: id, MaxPX: 1,
+	})
+	response := waitServiceReply(t, second).message
+	if response.Type != protocol.TypeThumbnail || response.Thumbnail == nil || response.Thumbnail.ID != id {
+		t.Fatalf("thumbnail after cancellation = %+v, want thumbnail for %q", response, id)
+	}
+}
+
 // A burst larger than the worker depth must queue, not fail: a history UI asks
 // for a whole screen of thumbnails at once.
 func TestThumbnailBurstQueuesInsteadOfFailing(t *testing.T) {
