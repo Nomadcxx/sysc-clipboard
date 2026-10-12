@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -189,6 +190,76 @@ func TestSaveFailureLeavesPreviousManifestUsable(t *testing.T) {
 	}
 	if len(loaded.Items) != 1 || string(loaded.Items[0].Payload()) != "first" {
 		t.Fatalf("loaded after rollback = %+v", loaded)
+	}
+}
+
+func TestWarmSaveDoesNotCopyUnchangedPayload(t *testing.T) {
+	const payloadSize = 16 << 20
+
+	h := history.New(1)
+	if _, err := h.Capture(history.Capture{
+		Generation: 1,
+		Kind:       protocol.KindImage,
+		MIME:       "image/png",
+		Payload:    bytes.Repeat([]byte{0x5a}, payloadSize),
+		CapturedAt: time.Unix(1, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := New(filepath.Join(t.TempDir(), "state"), bytes.Repeat([]byte{12}, KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(h.Items()); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if err := state.Save(h.Items()); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated >= payloadSize/2 {
+		t.Fatalf("warm unchanged save allocated %d bytes for %d-byte history", allocated, payloadSize)
+	}
+}
+
+func BenchmarkWarmPinSaveHistoryBytes(b *testing.B) {
+	for _, payloadSize := range []int{1 << 20, 16 << 20} {
+		b.Run(fmt.Sprintf("%dMiB", payloadSize>>20), func(b *testing.B) {
+			h := history.New(1)
+			if _, err := h.Capture(history.Capture{
+				Generation: 1,
+				Kind:       protocol.KindImage,
+				MIME:       "image/png",
+				Payload:    bytes.Repeat([]byte{0x5a}, payloadSize),
+				CapturedAt: time.Unix(1, 0).UTC(),
+			}); err != nil {
+				b.Fatal(err)
+			}
+			state, err := New(filepath.Join(b.TempDir(), "state"), bytes.Repeat([]byte{13}, KeyBytes))
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := state.Save(h.Items()); err != nil {
+				b.Fatal(err)
+			}
+			id := h.Snapshot()[0].ID
+			b.ReportAllocs()
+			b.SetBytes(int64(payloadSize))
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				if _, err := h.SetPinned(id, index%2 == 0); err != nil {
+					b.Fatal(err)
+				}
+				if err := state.Save(h.Items()); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
