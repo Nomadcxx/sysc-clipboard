@@ -79,14 +79,14 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	var parsed options
 	flags := flag.NewFlagSet("sysc-clipboard", flag.ContinueOnError)
 	flags.SetOutput(output)
-	flags.StringVar(&parsed.keyFile, "key-file", "", "use a private 32-byte key file instead of Secret Service")
-	flags.StringVar(&parsed.stateDir, "state-dir", "", "clipboard state directory")
-	flags.BoolVar(&parsed.check, "check", false, "check persistence and runtime configuration, then exit")
+	flags.StringVar(&parsed.keyFile, "key-file", "", help("use a private 32-byte key file instead of Secret Service"))
+	flags.StringVar(&parsed.stateDir, "state-dir", "", help("clipboard state directory"))
+	flags.BoolVar(&parsed.check, "check", false, help("check persistence and runtime configuration, then exit"))
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
 	if flags.NArg() != 0 {
-		return options{}, fmt.Errorf("unexpected argument %q", flags.Arg(0))
+		return options{}, fmt.Errorf(help("unexpected argument %q"), flags.Arg(0))
 	}
 	return parsed, nil
 }
@@ -94,7 +94,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 func resolveStateDir(override string) (string, error) {
 	if override != "" {
 		if !filepath.IsAbs(override) {
-			return "", fmt.Errorf("clipboard state directory must be absolute")
+			return "", errors.New(help("clipboard state directory must be absolute"))
 		}
 		return filepath.Clean(override), nil
 	}
@@ -142,7 +142,7 @@ func loadState(stateDir, keyFile string) (runtimeState, error) {
 		state.persistence = protocol.PersistenceVolatile
 	}
 	if len(loaded.Dropped) > 0 {
-		state.warnings = append(state.warnings, fmt.Errorf("dropped %d unreadable clipboard entries", len(loaded.Dropped)))
+		state.warnings = append(state.warnings, fmt.Errorf(help("dropped %d unreadable clipboard entries"), len(loaded.Dropped)))
 		state.persistence = protocol.PersistenceVolatile
 	}
 	return state, nil
