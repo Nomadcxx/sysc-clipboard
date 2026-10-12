@@ -12,10 +12,17 @@ func TestHelpLocalePrecedence(t *testing.T) {
 	if got := helpLocale(); got != "ja" {
 		t.Fatalf("helpLocale() = %q, want ja", got)
 	}
+	t.Setenv("LC_MESSAGES", "ru_RU.UTF-8")
 	t.Setenv("LC_ALL", "C")
-	if got := helpLocale(); got != "ja" {
-		t.Fatalf("C should fall through to LANG, got %q", got)
+	if got := helpLocale(); got != "" {
+		t.Fatalf("LC_ALL=C should force English, got %q", got)
 	}
+	t.Setenv("LC_ALL", "")
+	t.Setenv("LC_MESSAGES", "POSIX")
+	if got := helpLocale(); got != "" {
+		t.Fatalf("LC_MESSAGES=POSIX should force English, got %q", got)
+	}
+	t.Setenv("LC_MESSAGES", "")
 	t.Setenv("LC_ALL", "es_MX@variant")
 	if got := helpLocale(); got != "es" {
 		t.Fatalf("helpLocale() = %q, want es", got)
@@ -47,7 +54,7 @@ func TestHelpTranslatesGuidance(t *testing.T) {
 			t.Fatalf("%s catalog missing", locale)
 		}
 		if len(catalog) != 6 {
-			t.Fatalf("%s catalog has %d keys, want 5", locale, len(catalog))
+			t.Fatalf("%s catalog has %d keys, want 6", locale, len(catalog))
 		}
 		for english, translated := range catalog {
 			if translated == "" {

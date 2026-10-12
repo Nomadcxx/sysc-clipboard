@@ -28,8 +28,11 @@ func help(s string) string {
 func helpLocale() string {
 	for _, name := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
 		tag := strings.ToLower(os.Getenv(name))
-		if tag == "" || tag == "c" || tag == "posix" {
+		if tag == "" {
 			continue
+		}
+		if tag == "c" || tag == "posix" {
+			return ""
 		}
 		base := tag
 		for i, r := range tag {
