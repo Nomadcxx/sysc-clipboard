@@ -354,12 +354,11 @@ func (service *Service) runThumbnailWorker() {
 			if !ok || service.ctx.Err() != nil {
 				return
 			}
-			if job.ctx.Err() != nil {
-				continue
-			}
-			thumbnail, err := service.thumbnailize(job.item, job.maxPX)
-			if job.ctx.Err() != nil {
-				continue
+			// Every dispatched job needs a result so the reducer can release the worker slot.
+			var thumbnail protocol.Thumbnail
+			var err error
+			if job.ctx.Err() == nil {
+				thumbnail, err = service.thumbnailize(job.item, job.maxPX)
 			}
 			result := thumbnailResult{
 				ctx: job.ctx, requestID: job.requestID, maxPX: job.maxPX,
@@ -369,7 +368,6 @@ func (service *Service) runThumbnailWorker() {
 			case service.thumbnailResults <- result:
 			case <-service.ctx.Done():
 				return
-			case <-job.ctx.Done():
 			}
 		}
 	}
