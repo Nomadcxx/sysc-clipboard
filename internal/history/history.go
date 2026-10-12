@@ -271,10 +271,12 @@ func (history *History) Snapshot() []protocol.Entry {
 	return entries
 }
 
+// Items snapshots metadata and shares immutable payload storage.
+// ponytail: history payloads are replaced, never mutated, so a history-sized clone is unnecessary.
 func (history *History) Items() []Item {
 	items := make([]Item, len(history.entries))
 	for index, entry := range history.entries {
-		items[index] = Item{metadata: cloneEntry(entry.metadata), payload: bytes.Clone(entry.payload)}
+		items[index] = Item{metadata: cloneEntry(entry.metadata), payload: entry.payload}
 	}
 	return items
 }

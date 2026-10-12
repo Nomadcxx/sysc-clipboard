@@ -82,20 +82,18 @@ func New(root string, key []byte) (*Store, error) {
 
 func (store *Store) Save(items []history.Item) error {
 	entries := make([]protocol.Entry, 0, len(items))
-	validated := make([]history.Item, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		valid, err := history.NewItem(item.Metadata(), item.Payload())
-		if err != nil {
-			return err
+		metadata := item.Metadata()
+		// ponytail: history.Item payloads are immutable and hash-checked at construction; rehashing unchanged bytes only repeats that work.
+		if uint64(item.PayloadReader().Size()) != metadata.Size {
+			return fmt.Errorf("%w: payload size does not match metadata", history.ErrInvalidCapture)
 		}
-		metadata := valid.Metadata()
 		if _, ok := seen[metadata.ID]; ok {
 			return fmt.Errorf("duplicate clipboard entry ID %q", metadata.ID)
 		}
 		seen[metadata.ID] = struct{}{}
 		entries = append(entries, metadata)
-		validated = append(validated, valid)
 	}
 	if len(entries) > protocol.MaxEntries {
 		return ErrStorageLimit
@@ -121,7 +119,7 @@ func (store *Store) Save(items []history.Item) error {
 		temporary string
 		final     string
 	}
-	staged := make([]stagedFile, 0, len(validated))
+	staged := make([]stagedFile, 0, len(items))
 	defer func() {
 		for _, file := range staged {
 			_ = os.Remove(file.temporary)
@@ -129,8 +127,8 @@ func (store *Store) Save(items []history.Item) error {
 		_ = os.Remove(store.manifestPath + ".new")
 	}()
 
-	for _, item := range validated {
-		metadata := item.Metadata()
+	for index, item := range items {
+		metadata := entries[index]
 		final := filepath.Join(store.entriesDir, metadata.ID+".enc")
 		info, statErr := os.Lstat(final)
 		switch {
@@ -143,7 +141,11 @@ func (store *Store) Save(items []history.Item) error {
 			return fmt.Errorf("inspect clipboard payload file: %w", statErr)
 		}
 
-		sealed, err := seal(store.key, payloadPurpose, metadata.ID, item.Payload())
+		payload, err := io.ReadAll(item.PayloadReader())
+		if err != nil {
+			return fmt.Errorf("read clipboard payload: %w", err)
+		}
+		sealed, err := seal(store.key, payloadPurpose, metadata.ID, payload)
 		if err != nil {
 			return err
 		}
