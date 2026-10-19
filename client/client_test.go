@@ -291,6 +291,18 @@ func TestClientCommandsEncodeAllDaemonOperations(t *testing.T) {
 	}
 }
 
+func TestRestoreWithRequestIDReturnsQueuedID(t *testing.T) {
+	client := newClientWithOptions("/tmp/clipboard-test.sock", clientOptions{})
+	requestID, err := client.RestoreWithRequestID("entry")
+	if err != nil {
+		t.Fatalf("RestoreWithRequestID: %v", err)
+	}
+	message := <-client.commands
+	if message.Type != protocol.TypeRestore || message.ID != "entry" || message.RequestID != requestID {
+		t.Fatalf("queued restore = %+v, returned request ID = %q", message, requestID)
+	}
+}
+
 func TestClientRejectsInvalidSocketPath(t *testing.T) {
 	if _, err := New("relative.sock"); err == nil {
 		t.Fatal("New accepted a relative socket path")
