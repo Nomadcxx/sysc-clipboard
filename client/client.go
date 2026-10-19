@@ -365,7 +365,18 @@ func (client *Client) newCommand(messageType protocol.MessageType, id string, pi
 }
 
 func (client *Client) Restore(id string) error {
-	return client.enqueue(client.newCommand(protocol.TypeRestore, id, nil, "", 0))
+	_, err := client.RestoreWithRequestID(id)
+	return err
+}
+
+// RestoreWithRequestID queues a restore and returns the request ID echoed by
+// the daemon's acknowledgement or error response.
+func (client *Client) RestoreWithRequestID(id string) (string, error) {
+	message := client.newCommand(protocol.TypeRestore, id, nil, "", 0)
+	if err := client.enqueue(message); err != nil {
+		return "", err
+	}
+	return message.RequestID, nil
 }
 
 func (client *Client) Pin(id string, pinned bool) error {
