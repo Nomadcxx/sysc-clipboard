@@ -1,0 +1,38 @@
+name: Dependency scan
+
+# govulncheck reports the published vulnerabilities whose symbols this module
+# actually calls. It runs on every pull request, on every push to main, and
+# once a week, because a flaw can be published after the commit that pulled
+# the affected module in. The weekly run is the only one that can catch that.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '31 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Pinned, not @latest: an unpinned install changes the scanner without a
+      # commit, which is how a gate starts failing for reasons that have
+      # nothing to do with the tree. v1.9.0 is the newest release and the one
+      # the tree was last scanned with.
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: scan reachable dependency flaws
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'
