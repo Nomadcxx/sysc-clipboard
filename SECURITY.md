@@ -32,11 +32,10 @@ in the next release.
 
 ## The standing scan
 
-This repository has no scan of its own tree yet. The scan in the shell repository covers the code
-this repository is pinned into, because that is where the module graph is resolved: `govulncheck`
-reports the published flaws whose symbols the calling module reaches, and the calling module here is
-the shell. The scan of this tree takes the shape of the shell's: a weekly cron beside the release
-workflow, with the scanner version pinned in it.
+This repository runs `govulncheck` in CI on every pull request, on every push to the default branch,
+and once a week. The workflow is `.github/workflows/vuln.yml` and the scanner version is pinned in
+it, so the scan does not change without a commit. It reports the published flaws whose symbols this
+module actually calls.
 
 A green scan is not a warranty that the tree has no flaw in it. The scan reads the advisories the Go
 project publishes; a flaw in this repository's own code is not in that feed.
