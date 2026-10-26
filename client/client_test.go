@@ -378,16 +378,22 @@ func startClientServer(t *testing.T, handler func(net.Conn)) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	release := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		connection, err := listener.Accept()
 		if err == nil {
 			handler(connection)
+			// The connection stays open until the test finishes so that the
+			// client cannot mark the session unavailable while the test is
+			// still asserting on the handshake.
+			<-release
 			_ = connection.Close()
 		}
 	}()
 	t.Cleanup(func() {
+		close(release)
 		_ = listener.Close()
 		select {
 		case <-done:
