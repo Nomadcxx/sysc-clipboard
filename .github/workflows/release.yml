@@ -154,6 +154,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.tag }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           name: sysc-clipboard-binaries
