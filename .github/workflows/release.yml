@@ -3,47 +3,171 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # Manual runs build and upload artifacts only; the release step fires on
-  # tag refs alone.
+  # A manual run rehearses the gate for a tag without publishing anything:
+  # gh workflow run release.yml --ref main -f tag=v0.1.4
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The tag to rehearse, for example v0.1.4.'
+        required: true
+        type: string
+
+# A release must never be cancelled mid-flight, so superseded runs queue.
+concurrency:
+  group: ${{ github.workflow }}-release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  # The gate proves three things before anything is published: the tag has the
+  # shape this project publishes, it points at a commit that reached the
+  # default branch, and that commit passes the same checks the branch
+  # protection requires. Nothing is published until the gate passes.
+  gate:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.tag.outputs.commit }}
     steps:
       - uses: actions/checkout@v7
         with:
+          # The whole history and every tag: the ancestry check needs the
+          # merge that carried the tagged commit onto the default branch.
           fetch-depth: 0
+      - name: Parse tag
+        id: tag
+        env:
+          # A dispatch names the tag it rehearses; a tag push carries it in
+          # the ref.
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "tag '$tag' is not v<major>.<minor>.<patch>" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            git fetch --no-tags --force origin "refs/tags/$tag:refs/tags/$tag"
+            echo "commit=$(git rev-list -n1 "$tag")" >> "$GITHUB_OUTPUT"
+          else
+            # A rehearsal runs from a branch, so the tag it names does not
+            # exist yet. The commit it would point at is the head of the
+            # ref the rehearsal runs from.
+            echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify the tagged commit reached the default branch
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          COMMIT: ${{ steps.tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$COMMIT" origin/main; then
+            echo "tag $TAG points at $COMMIT, which never reached main" >&2
+            exit 1
+          fi
 
+  # The checks the branch protection requires, re-run against the tagged
+  # commit. Calling the workflows the branch already trusts keeps one test
+  # policy: a check added to ci.yml reaches the release gate without a second
+  # edit here. A called run is pinned to the tag, so it tests the tree that
+  # ships.
+  checks:
+    needs: gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  scan:
+    needs: gate
+    uses: ./.github/workflows/vuln.yml
+    permissions:
+      contents: read
+
+  # Builds the binary from the tagged commit and proves the binary carries
+  # that commit. The stamp comes from the build itself, so it cannot be
+  # forged by the workflow that runs the build.
+  build:
+    needs: [gate, checks, scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history: the build stamps the revision it was built
+          # from, and the stamp is only written when the tree is a checkout.
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-
       - name: Build binaries
         run: |
           set -euo pipefail
           mkdir -p dist
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w' -o dist/sysc-clipboard ./cmd/sysc-clipboard
           (cd dist && sha256sum * > SHA256SUMS)
-
+      - name: Verify the binary carries the tagged commit
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          # The build stamp records the revision the compiler saw, so it
+          # proves the artifact came from the tagged tree and not from
+          # another one.
+          info="$(go version -m dist/sysc-clipboard)"
+          revision="$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*build[[:space:]]*vcs\.revision=//p')"
+          modified="$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*build[[:space:]]*vcs\.modified=//p')"
+          if [ -z "$revision" ]; then
+            echo "the binary carries no build revision, so it did not come from a checkout" >&2
+            exit 1
+          fi
+          if [ "$revision" != "$COMMIT" ]; then
+            echo "the binary was built from $revision, not from the tagged commit $COMMIT" >&2
+            exit 1
+          fi
+          if [ "$modified" != "false" ]; then
+            echo "the binary was built from a modified tree" >&2
+            exit 1
+          fi
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
       - uses: actions/upload-artifact@v7
         with:
           name: sysc-clipboard-binaries
           path: dist/
 
+  # Publishes the release once the gate and the build passed. A manual run
+  # stops here: only a tag push publishes.
+  release:
+    needs: [gate, checks, scan, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sysc-clipboard-binaries
+          path: dist
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists; uploading assets."
-            gh release upload "$tag" dist/* --clobber
-            exit 0
-          fi
-          gh release create "$tag" dist/* --verify-tag --latest --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Re-running a finished release re-uploads the assets instead of
+            # failing on the release that already exists.
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --latest --generate-notes
+          fi

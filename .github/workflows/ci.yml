@@ -3,11 +3,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow calls this one to re-run the same checks against the
+  # tagged commit. A called run is pinned to the tag, so the tree under test
+  # is the tree that ships.
+  workflow_call:
 
 # Supersede in-flight runs for the same branch or PR so a burst of pushes does
 # not queue a full build each.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The suffix names the workflow file rather than the run. A called workflow
+  # sees the caller's workflow name, so an unsuffixed group would be shared
+  # by the release run and by the checks it calls, and the two would cancel
+  # each other.
+  group: ${{ github.workflow }}-ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

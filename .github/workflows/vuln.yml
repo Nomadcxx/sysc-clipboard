@@ -12,12 +12,19 @@ on:
   schedule:
     - cron: '31 5 * * 1'
   workflow_dispatch:
+  # The release workflow calls this one to re-run the scan against the tagged
+  # commit.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The suffix names the workflow file rather than the run. A called workflow
+  # sees the caller's workflow name, so an unsuffixed group would be shared
+  # by the release run and by the checks it calls, and the two would cancel
+  # each other.
+  group: ${{ github.workflow }}-scan-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
