@@ -58,6 +58,13 @@ func TestServerPrivateSocketHandshakeAndSnapshot(t *testing.T) {
 	if hello.Type != protocol.TypeHello || hello.Hello == nil || hello.Hello.Wayland != protocol.WaylandUnavailable {
 		t.Fatalf("hello = %+v", hello)
 	}
+	copySupported := false
+	for _, capability := range hello.Hello.Capabilities {
+		copySupported = copySupported || capability == "copy"
+	}
+	if !copySupported {
+		t.Fatalf("server hello capabilities = %v, want copy", hello.Hello.Capabilities)
+	}
 	snapshot, err := protocol.ReadMessage(conn)
 	if err != nil {
 		t.Fatal(err)

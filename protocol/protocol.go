@@ -4,6 +4,7 @@ package protocol
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ const (
 	TypeDelta     MessageType = "delta"
 	TypeAck       MessageType = "ack"
 	TypeError     MessageType = "error"
+	TypeCopy      MessageType = "copy"
 	TypeRestore   MessageType = "restore"
 	TypePin       MessageType = "pin"
 	TypeDelete    MessageType = "delete"
@@ -171,6 +173,7 @@ type Message struct {
 	Thumbnail *Thumbnail `json:"thumbnail,omitempty"`
 
 	ID     string     `json:"id,omitempty"`
+	Text   string     `json:"text,omitempty"`
 	Pinned *bool      `json:"pinned,omitempty"`
 	Scope  ClearScope `json:"scope,omitempty"`
 	MaxPX  uint16     `json:"max_px,omitempty"`
@@ -225,6 +228,8 @@ func ValidateMessage(message Message) error {
 			return err
 		}
 		return noCommandFields(message, false, false, false, false)
+	case TypeCopy:
+		return validateCopy(message)
 	case TypeRestore, TypeDelete:
 		if err := validateRequiredID(message.ID); err != nil {
 			return err
@@ -262,6 +267,29 @@ func ValidateMessage(message Message) error {
 	default:
 		panic("validated message type missing switch case")
 	}
+}
+
+func validateCopy(message Message) error {
+	if message.Text == "" {
+		return fmt.Errorf("copy text is empty")
+	}
+	if !utf8.ValidString(message.Text) {
+		return fmt.Errorf("copy text is not valid UTF-8")
+	}
+	if len(message.Text) > MaxFrame {
+		return fmt.Errorf("copy text exceeds frame limit")
+	}
+	if err := noCommandFields(message, false, false, false, false); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("encode copy message: %w", err)
+	}
+	if len(encoded) > MaxFrame {
+		return fmt.Errorf("copy message exceeds frame limit %d", MaxFrame)
+	}
+	return nil
 }
 
 func ValidateSnapshot(snapshot Snapshot) error {
@@ -455,6 +483,9 @@ func noCommandFields(message Message, allowID, allowPinned, allowScope, allowMax
 	if !allowID && message.ID != "" {
 		return fmt.Errorf("message contains unexpected id")
 	}
+	if message.Type != TypeCopy && message.Text != "" {
+		return fmt.Errorf("message contains unexpected text")
+	}
 	if !allowPinned && message.Pinned != nil {
 		return fmt.Errorf("message contains unexpected pinned value")
 	}
@@ -487,7 +518,7 @@ func noCommandFields(message Message, allowID, allowPinned, allowScope, allowMax
 
 func validMessageType(messageType MessageType) bool {
 	switch messageType {
-	case TypeHello, TypeSnapshot, TypeDelta, TypeAck, TypeError, TypeRestore, TypePin, TypeDelete, TypeClear, TypeThumbnail, TypeResync:
+	case TypeHello, TypeSnapshot, TypeDelta, TypeAck, TypeError, TypeCopy, TypeRestore, TypePin, TypeDelete, TypeClear, TypeThumbnail, TypeResync:
 		return true
 	default:
 		return false

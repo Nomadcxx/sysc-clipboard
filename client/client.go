@@ -18,6 +18,7 @@ var (
 	ErrClientRunning    = errors.New("clipboard client is already running")
 	ErrCommandQueueFull = errors.New("clipboard client command queue is full")
 	ErrRevisionGap      = errors.New("clipboard client revision gap")
+	ErrCopyUnsupported  = errors.New("clipboard daemon does not support copy")
 )
 
 const (
@@ -50,12 +51,13 @@ type Client struct {
 	done       chan struct{}
 	runOnce    sync.Once
 
-	mu        sync.RWMutex
-	snapshot  protocol.Snapshot
-	connected bool
-	closed    bool
-	published bool
-	requestID uint64
+	mu           sync.RWMutex
+	snapshot     protocol.Snapshot
+	capabilities []string
+	connected    bool
+	closed       bool
+	published    bool
+	requestID    uint64
 }
 
 // New creates a client for an absolute daemon socket path.
@@ -159,7 +161,7 @@ func (client *Client) handshake(ctx context.Context, connection net.Conn) (proto
 	if err := writeMessage(connection, protocol.Message{
 		Version: protocol.Version,
 		Type:    protocol.TypeHello,
-		Hello:   &protocol.Hello{Capabilities: []string{"restore", "pin", "delete", "clear", "thumbnail", "resync"}},
+		Hello:   &protocol.Hello{Capabilities: []string{"copy", "restore", "pin", "delete", "clear", "thumbnail", "resync"}},
 	}); err != nil {
 		return protocol.Snapshot{}, err
 	}
@@ -178,6 +180,9 @@ func (client *Client) handshake(ctx context.Context, connection net.Conn) (proto
 	if hello.Type != protocol.TypeHello || hello.Hello == nil {
 		return protocol.Snapshot{}, errors.New("clipboard daemon sent an invalid hello")
 	}
+	client.mu.Lock()
+	client.capabilities = append([]string(nil), hello.Hello.Capabilities...)
+	client.mu.Unlock()
 	snapshotMessage, err := protocol.ReadMessage(connection)
 	if err != nil {
 		return protocol.Snapshot{}, err
@@ -227,6 +232,22 @@ func (client *Client) serveConnection(ctx context.Context, connection net.Conn) 
 		case <-ctx.Done():
 			return ctx.Err()
 		case command := <-client.commands:
+			if command.Type == protocol.TypeCopy {
+				_, supported := client.capability("copy")
+				if !supported {
+					client.emit(protocol.Message{
+						Version:   protocol.Version,
+						Type:      protocol.TypeError,
+						RequestID: command.RequestID,
+						Error: &protocol.ErrorBody{
+							Code:      protocol.ErrorUnsupported,
+							Message:   ErrCopyUnsupported.Error(),
+							RequestID: command.RequestID,
+						},
+					}, true)
+					continue
+				}
+			}
 			if err := writeMessage(connection, command); err != nil {
 				return err
 			}
@@ -293,6 +314,7 @@ func (client *Client) markConnected(message protocol.Message, snapshot protocol.
 
 func (client *Client) markUnavailable() {
 	client.mu.Lock()
+	client.capabilities = nil
 	if !client.published || client.connected || client.snapshot.Wayland != protocol.WaylandUnavailable {
 		client.snapshot.Wayland = protocol.WaylandUnavailable
 		client.connected = false
@@ -304,6 +326,17 @@ func (client *Client) markUnavailable() {
 		return
 	}
 	client.mu.Unlock()
+}
+
+func (client *Client) capability(name string) (connected, supported bool) {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	for _, capability := range client.capabilities {
+		if capability == name {
+			return client.connected, true
+		}
+	}
+	return client.connected, false
 }
 
 func (client *Client) emit(message protocol.Message, connected bool) {
@@ -367,6 +400,16 @@ func (client *Client) newCommand(messageType protocol.MessageType, id string, pi
 func (client *Client) Restore(id string) error {
 	_, err := client.RestoreWithRequestID(id)
 	return err
+}
+
+// Copy queues text for the daemon to place on the Wayland clipboard.
+func (client *Client) Copy(text string) error {
+	if connected, supported := client.capability("copy"); connected && !supported {
+		return ErrCopyUnsupported
+	}
+	message := client.newCommand(protocol.TypeCopy, "", nil, "", 0)
+	message.Text = text
+	return client.enqueue(message)
 }
 
 // RestoreWithRequestID queues a restore and returns the request ID echoed by

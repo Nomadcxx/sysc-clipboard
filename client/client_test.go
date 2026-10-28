@@ -22,6 +22,13 @@ func TestClientHandshakesAndPublishesSnapshot(t *testing.T) {
 		if err != nil || hello.Type != protocol.TypeHello {
 			return
 		}
+		copySupported := false
+		for _, capability := range hello.Hello.Capabilities {
+			copySupported = copySupported || capability == "copy"
+		}
+		if !copySupported {
+			t.Errorf("client hello capabilities = %v, want copy", hello.Hello.Capabilities)
+		}
 		_ = protocol.WriteMessage(connection, protocol.Message{
 			Version: protocol.Version,
 			Type:    protocol.TypeHello,
@@ -250,10 +257,16 @@ func TestClientCommandQueueIsBoundedAndNonBlocking(t *testing.T) {
 	if err := client.Pin("entry", true); !errors.Is(err, ErrCommandQueueFull) {
 		t.Fatalf("Pin overflow error = %v, want %v", err, ErrCommandQueueFull)
 	}
+	if err := client.Copy("text"); !errors.Is(err, ErrCommandQueueFull) {
+		t.Fatalf("Copy overflow error = %v, want %v", err, ErrCommandQueueFull)
+	}
 }
 
 func TestClientCommandsEncodeAllDaemonOperations(t *testing.T) {
 	client := newClientWithOptions("/tmp/clipboard-test.sock", clientOptions{})
+	if err := client.Copy("/usr/bin/firefox"); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.Restore("entry"); err != nil {
 		t.Fatal(err)
 	}
@@ -273,6 +286,7 @@ func TestClientCommandsEncodeAllDaemonOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []protocol.MessageType{
+		protocol.TypeCopy,
 		protocol.TypeRestore,
 		protocol.TypePin,
 		protocol.TypeDelete,
@@ -288,6 +302,95 @@ func TestClientCommandsEncodeAllDaemonOperations(t *testing.T) {
 		if err := protocol.ValidateMessage(message); err != nil {
 			t.Fatalf("command[%d] invalid: %v", index, err)
 		}
+		if message.Type == protocol.TypeCopy && message.Text != "/usr/bin/firefox" {
+			t.Fatalf("copy command text = %q", message.Text)
+		}
+	}
+}
+
+func TestClientCopyRejectsInvalidTextBeforeQueueing(t *testing.T) {
+	client := newClientWithOptions("/tmp/clipboard-test.sock", clientOptions{})
+	if err := client.Copy(""); err == nil {
+		t.Fatal("Copy accepted empty text")
+	}
+	if len(client.commands) != 0 {
+		t.Fatalf("queued commands = %d, want 0", len(client.commands))
+	}
+}
+
+func TestClientCopyRequiresServerCapability(t *testing.T) {
+	received := make(chan protocol.Message, 1)
+	path := startClientServer(t, func(connection net.Conn) {
+		if !readHello(connection) {
+			return
+		}
+		_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeHello, Hello: &protocol.Hello{Capabilities: []string{"restore"}}})
+		_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &protocol.Snapshot{Persistence: protocol.PersistenceUnavailable, Wayland: protocol.WaylandUnavailable}})
+		message, err := protocol.ReadMessage(connection)
+		if err == nil {
+			received <- message
+			_ = connection.Close() // An older daemon closes on an unknown message type.
+		}
+	})
+
+	client := newTestClient(t, path)
+	if err := client.Copy("queued before handshake"); err != nil {
+		t.Fatalf("queue Copy: %v", err)
+	}
+	cancel, done := startClient(t, client)
+	_ = nextUpdate(t, client.Updates())
+	update := nextUpdate(t, client.Updates())
+	if !update.Connected || update.Message.Type != protocol.TypeError || update.Message.RequestID != "request-1" || update.Message.Error == nil || update.Message.Error.Code != protocol.ErrorUnsupported || update.Message.Error.RequestID != "request-1" {
+		t.Fatalf("unsupported copy update = %+v", update)
+	}
+	if err := client.Copy("after handshake"); !errors.Is(err, ErrCopyUnsupported) {
+		t.Fatalf("Copy error = %v, want %v", err, ErrCopyUnsupported)
+	}
+	cancel()
+	<-done
+	select {
+	case message := <-received:
+		t.Fatalf("sent unsupported command %+v", message)
+	default:
+	}
+}
+
+func TestClientCopySendsWhenServerAdvertisesCapability(t *testing.T) {
+	commands := make(chan protocol.Message, 1)
+	path := startClientServer(t, func(connection net.Conn) {
+		if !readHello(connection) {
+			return
+		}
+		_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeHello, Hello: &protocol.Hello{Capabilities: []string{"copy"}}})
+		_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &protocol.Snapshot{Persistence: protocol.PersistenceUnavailable, Wayland: protocol.WaylandUnavailable}})
+		message, err := protocol.ReadMessage(connection)
+		if err == nil {
+			commands <- message
+			_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeAck, Ack: &protocol.Ack{RequestID: message.RequestID}})
+		}
+	})
+
+	client := newTestClient(t, path)
+	cancel, done := startClient(t, client)
+	defer func() {
+		cancel()
+		<-done
+	}()
+	_ = nextUpdate(t, client.Updates())
+	if err := client.Copy("hello"); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	select {
+	case message := <-commands:
+		if message.Type != protocol.TypeCopy || message.Text != "hello" {
+			t.Fatalf("copy command = %+v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server received no copy command")
+	}
+	update := nextUpdate(t, client.Updates())
+	if update.Message.Type != protocol.TypeAck {
+		t.Fatalf("copy acknowledgement = %+v", update.Message)
 	}
 }
 

@@ -4,6 +4,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -442,6 +444,8 @@ func (service *Service) run(options Options) {
 					state.requestThumbnail(service, request)
 				case protocol.TypeRestore:
 					state.requestRestore(service, request)
+				case protocol.TypeCopy:
+					state.requestCopy(service, request)
 				default:
 					request.reply <- serviceReply{message: state.execute(request.message)}
 				}
@@ -509,6 +513,24 @@ func (state *reducerState) requestRestore(service *Service, request serviceReque
 		request.reply <- serviceReply{message: errorMessage(message.RequestID, protocol.ErrorNotFound, history.ErrNotFound.Error())}
 		return
 	}
+	state.scheduleRestore(service, request, item, message.ID)
+}
+
+func (state *reducerState) requestCopy(service *Service, request serviceRequest) {
+	message := request.message
+	if service.restore == nil {
+		request.reply <- serviceReply{message: errorMessage(message.RequestID, protocol.ErrorUnavailable, "clipboard copy is unavailable")}
+		return
+	}
+	item, err := newCopyItem(message.Text)
+	if err != nil {
+		request.reply <- serviceReply{message: errorMessage(message.RequestID, protocol.ErrorProtocol, boundedError(err))}
+		return
+	}
+	state.scheduleRestore(service, request, item, "")
+}
+
+func (state *reducerState) scheduleRestore(service *Service, request serviceRequest, item history.Item, itemID string) {
 	ctx := request.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -519,15 +541,29 @@ func (state *reducerState) requestRestore(service *Service, request serviceReque
 	state.nextRestoreID++
 	id := state.nextRestoreID
 	jobCtx, cancel := context.WithTimeout(ctx, restoreTimeout)
-	state.pendingRestores[id] = pendingRestore{itemID: message.ID, cancel: cancel}
-	job := restoreJob{id: id, ctx: jobCtx, cancel: cancel, requestID: message.RequestID, item: item, reply: request.reply}
+	state.pendingRestores[id] = pendingRestore{itemID: itemID, cancel: cancel}
+	job := restoreJob{id: id, ctx: jobCtx, cancel: cancel, requestID: request.message.RequestID, item: item, reply: request.reply}
 	select {
 	case service.restoreJobs <- job:
 	default:
 		delete(state.pendingRestores, id)
 		cancel()
-		request.reply <- serviceReply{message: errorMessage(message.RequestID, protocol.ErrorUnavailable, "clipboard restore worker is busy")}
+		request.reply <- serviceReply{message: errorMessage(request.message.RequestID, protocol.ErrorUnavailable, "clipboard restore worker is busy")}
 	}
+}
+
+func newCopyItem(text string) (history.Item, error) {
+	payload := []byte(text)
+	hash := sha256.Sum256(payload)
+	return history.NewItem(protocol.Entry{
+		ID:          "copy",
+		Kind:        protocol.KindText,
+		MIME:        "text/plain;charset=utf-8",
+		OfferedMIME: []string{"text/plain;charset=utf-8"},
+		Size:        uint64(len(payload)),
+		SHA256:      hex.EncodeToString(hash[:]),
+		CapturedAt:  time.Now().UTC(),
+	}, payload)
 }
 
 func (state *reducerState) requestThumbnail(service *Service, request serviceRequest) {
