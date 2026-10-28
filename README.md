@@ -101,7 +101,7 @@ go get github.com/Nomadcxx/sysc-clipboard/client
 ```
 
 The client package offers `Copy`, `Restore`, `Pin`, `Delete`, `Clear`, `Thumbnail` and `Resync`, plus
-an `Updates()` stream of snapshots and deltas.
+an `Updates()` stream of snapshots, deltas and command responses.
 
 ## History and storage
 
