@@ -159,7 +159,7 @@ func (client *Client) handshake(ctx context.Context, connection net.Conn) (proto
 	if err := writeMessage(connection, protocol.Message{
 		Version: protocol.Version,
 		Type:    protocol.TypeHello,
-		Hello:   &protocol.Hello{Capabilities: []string{"restore", "pin", "delete", "clear", "thumbnail", "resync"}},
+		Hello:   &protocol.Hello{Capabilities: []string{"copy", "restore", "pin", "delete", "clear", "thumbnail", "resync"}},
 	}); err != nil {
 		return protocol.Snapshot{}, err
 	}
@@ -367,6 +367,13 @@ func (client *Client) newCommand(messageType protocol.MessageType, id string, pi
 func (client *Client) Restore(id string) error {
 	_, err := client.RestoreWithRequestID(id)
 	return err
+}
+
+// Copy queues text for the daemon to place on the Wayland clipboard.
+func (client *Client) Copy(text string) error {
+	message := client.newCommand(protocol.TypeCopy, "", nil, "", 0)
+	message.Text = text
+	return client.enqueue(message)
 }
 
 // RestoreWithRequestID queues a restore and returns the request ID echoed by

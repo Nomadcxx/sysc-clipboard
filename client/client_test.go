@@ -22,6 +22,13 @@ func TestClientHandshakesAndPublishesSnapshot(t *testing.T) {
 		if err != nil || hello.Type != protocol.TypeHello {
 			return
 		}
+		copySupported := false
+		for _, capability := range hello.Hello.Capabilities {
+			copySupported = copySupported || capability == "copy"
+		}
+		if !copySupported {
+			t.Errorf("client hello capabilities = %v, want copy", hello.Hello.Capabilities)
+		}
 		_ = protocol.WriteMessage(connection, protocol.Message{
 			Version: protocol.Version,
 			Type:    protocol.TypeHello,
@@ -250,10 +257,16 @@ func TestClientCommandQueueIsBoundedAndNonBlocking(t *testing.T) {
 	if err := client.Pin("entry", true); !errors.Is(err, ErrCommandQueueFull) {
 		t.Fatalf("Pin overflow error = %v, want %v", err, ErrCommandQueueFull)
 	}
+	if err := client.Copy("text"); !errors.Is(err, ErrCommandQueueFull) {
+		t.Fatalf("Copy overflow error = %v, want %v", err, ErrCommandQueueFull)
+	}
 }
 
 func TestClientCommandsEncodeAllDaemonOperations(t *testing.T) {
 	client := newClientWithOptions("/tmp/clipboard-test.sock", clientOptions{})
+	if err := client.Copy("/usr/bin/firefox"); err != nil {
+		t.Fatal(err)
+	}
 	if err := client.Restore("entry"); err != nil {
 		t.Fatal(err)
 	}
@@ -273,6 +286,7 @@ func TestClientCommandsEncodeAllDaemonOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []protocol.MessageType{
+		protocol.TypeCopy,
 		protocol.TypeRestore,
 		protocol.TypePin,
 		protocol.TypeDelete,
@@ -288,6 +302,19 @@ func TestClientCommandsEncodeAllDaemonOperations(t *testing.T) {
 		if err := protocol.ValidateMessage(message); err != nil {
 			t.Fatalf("command[%d] invalid: %v", index, err)
 		}
+		if message.Type == protocol.TypeCopy && message.Text != "/usr/bin/firefox" {
+			t.Fatalf("copy command text = %q", message.Text)
+		}
+	}
+}
+
+func TestClientCopyRejectsInvalidTextBeforeQueueing(t *testing.T) {
+	client := newClientWithOptions("/tmp/clipboard-test.sock", clientOptions{})
+	if err := client.Copy(""); err == nil {
+		t.Fatal("Copy accepted empty text")
+	}
+	if len(client.commands) != 0 {
+		t.Fatalf("queued commands = %d, want 0", len(client.commands))
 	}
 }
 

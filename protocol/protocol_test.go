@@ -23,6 +23,7 @@ func validEntry() Entry {
 func TestValidateMessageAcceptsValidMessages(t *testing.T) {
 	for _, msg := range []Message{
 		{Version: Version, Type: TypeHello},
+		{Version: Version, Type: TypeCopy, RequestID: "copy-1", Text: "hello"},
 		{Version: Version, Type: TypeRestore, ID: "entry-1"},
 		{Version: Version, Type: TypePin, ID: "entry-1", Pinned: boolPtr(true)},
 		{Version: Version, Type: TypeClear, Scope: ClearUnpinned},
@@ -49,6 +50,25 @@ func TestValidateMessageAcceptsValidMessages(t *testing.T) {
 		if err := ValidateMessage(msg); err != nil {
 			t.Errorf("ValidateMessage(%s) = %v", msg.Type, err)
 		}
+	}
+}
+
+func TestValidateCopyMessageBoundsTextAndWireFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message Message
+	}{
+		{name: "empty", message: Message{Version: Version, Type: TypeCopy}},
+		{name: "invalid utf-8", message: Message{Version: Version, Type: TypeCopy, Text: string([]byte{0xff})}},
+		{name: "text limit", message: Message{Version: Version, Type: TypeCopy, Text: strings.Repeat("x", MaxTextBytes+1)}},
+		{name: "escaped frame limit", message: Message{Version: Version, Type: TypeCopy, Text: strings.Repeat("\x00", MaxFrame/6)}},
+		{name: "unexpected text field", message: Message{Version: Version, Type: TypeRestore, ID: "entry-1", Text: "hello"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateMessage(tc.message); err == nil {
+				t.Fatalf("ValidateMessage(%+v) succeeded", tc.message.Type)
+			}
+		})
 	}
 }
 
@@ -160,6 +180,21 @@ func TestWriteAndReadMessageRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Type != want.Type || got.Snapshot == nil || got.Snapshot.Revision != want.Snapshot.Revision {
+		t.Fatalf("message = %+v, want %+v", got, want)
+	}
+}
+
+func TestCopyMessageRoundTrip(t *testing.T) {
+	want := Message{Version: Version, Type: TypeCopy, RequestID: "copy-1", Text: "process /usr/bin/firefox"}
+	var wire bytes.Buffer
+	if err := WriteMessage(&wire, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadMessage(&wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != TypeCopy || got.RequestID != want.RequestID || got.Text != want.Text {
 		t.Fatalf("message = %+v, want %+v", got, want)
 	}
 }

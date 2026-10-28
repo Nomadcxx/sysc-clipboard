@@ -183,6 +183,51 @@ func TestServiceCommandsRestorePinDeleteAndClear(t *testing.T) {
 	}
 }
 
+func TestServiceCopyUsesWaylandRestoreWithoutChangingHistory(t *testing.T) {
+	var copied []byte
+	var metadata protocol.Entry
+	svc := NewService(Options{
+		History: history.New(1),
+		Restore: func(_ context.Context, item history.Item) error {
+			copied = item.Payload()
+			metadata = item.Metadata()
+			return nil
+		},
+		Persistence: protocol.PersistenceUnavailable,
+		Wayland:     protocol.WaylandReady,
+	})
+	t.Cleanup(svc.Close)
+
+	response := svc.Execute(context.Background(), protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeCopy, RequestID: "copy-1", Text: "process /usr/bin/firefox",
+	})
+	if response.Type != protocol.TypeAck || response.Ack == nil || response.Ack.RequestID != "copy-1" {
+		t.Fatalf("copy response = %+v", response)
+	}
+	if string(copied) != "process /usr/bin/firefox" || metadata.Kind != protocol.KindText || metadata.MIME != "text/plain;charset=utf-8" {
+		t.Fatalf("copied payload = %q, metadata = %+v", copied, metadata)
+	}
+	snapshot, err := svc.CurrentSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Revision != 0 || len(snapshot.Entries) != 0 {
+		t.Fatalf("copy changed history: %+v", snapshot)
+	}
+}
+
+func TestServiceCopyReportsUnavailableWithoutWaylandRestore(t *testing.T) {
+	svc := NewService(Options{History: history.New(1)})
+	t.Cleanup(svc.Close)
+
+	response := svc.Execute(context.Background(), protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeCopy, RequestID: "copy-1", Text: "hello",
+	})
+	if response.Type != protocol.TypeError || response.Error == nil || response.Error.Code != protocol.ErrorUnavailable || response.Error.RequestID != "copy-1" {
+		t.Fatalf("copy response = %+v", response)
+	}
+}
+
 func TestRestoreDoesNotBlockReducerSnapshot(t *testing.T) {
 	historyState := history.New(1)
 	if _, err := historyState.Capture(textCapture(1, "restore target", time.Unix(10, 0))); err != nil {

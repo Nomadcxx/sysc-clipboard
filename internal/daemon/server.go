@@ -337,7 +337,7 @@ func (server *Server) helloMessage(snapshot protocol.Snapshot) protocol.Message 
 		Version: protocol.Version,
 		Type:    protocol.TypeHello,
 		Hello: &protocol.Hello{
-			Capabilities: []string{"restore", "pin", "delete", "clear", "thumbnail", "resync"},
+			Capabilities: []string{"copy", "restore", "pin", "delete", "clear", "thumbnail", "resync"},
 			Persistence:  snapshot.Persistence,
 			Wayland:      snapshot.Wayland,
 		},
