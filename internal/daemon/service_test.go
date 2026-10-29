@@ -216,6 +216,64 @@ func TestServiceCopyUsesWaylandRestoreWithoutChangingHistory(t *testing.T) {
 	}
 }
 
+func TestServiceDisabledCaptureKeepsHistoryAndCopyAvailable(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stateStore, err := store.New(stateDir, bytes.Repeat([]byte{7}, store.KeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyState := history.New(1)
+	if _, err := historyState.Capture(textCapture(1, "existing", time.Unix(10, 0))); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateStore.Save(historyState.Items()); err != nil {
+		t.Fatal(err)
+	}
+	existingID := historyState.Snapshot()[0].ID
+
+	var copied string
+	svc := NewService(Options{
+		History:        historyState,
+		Store:          stateStore,
+		DisableCapture: true,
+		Persistence:    protocol.PersistenceDurable,
+		Wayland:        protocol.WaylandReady,
+		Restore: func(_ context.Context, item history.Item) error {
+			copied = string(item.Payload())
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+
+	if err := svc.Capture(context.Background(), textCapture(1, "not recorded", time.Unix(20, 0))); err != nil {
+		t.Fatal(err)
+	}
+	response := svc.Execute(context.Background(), protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeCopy, RequestID: "copy-1", Text: "copy still works",
+	})
+	if response.Type != protocol.TypeAck || response.Ack == nil || response.Ack.RequestID != "copy-1" || copied != "copy still works" {
+		t.Fatalf("copy response = %+v, copied = %q", response, copied)
+	}
+
+	snapshot, err := svc.CurrentSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Entries) != 1 || snapshot.Entries[0].ID != existingID {
+		t.Fatalf("history after disabled capture = %+v", snapshot.Entries)
+	}
+	persisted, err := stateStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Items) != 1 || persisted.Items[0].Metadata().ID != existingID {
+		t.Fatalf("persisted history after disabled capture = %+v", persisted.Items)
+	}
+}
+
 func TestServiceCopyReportsUnavailableWithoutWaylandRestore(t *testing.T) {
 	svc := NewService(Options{History: history.New(1)})
 	t.Cleanup(svc.Close)

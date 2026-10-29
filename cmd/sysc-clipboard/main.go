@@ -21,9 +21,10 @@ import (
 )
 
 type options struct {
-	keyFile  string
-	stateDir string
-	check    bool
+	keyFile        string
+	stateDir       string
+	check          bool
+	disableCapture bool
 }
 
 type runtimeState struct {
@@ -57,7 +58,7 @@ func run(parent context.Context, args []string, output, errorsOutput io.Writer) 
 		return 1
 	}
 	if parsed.check {
-		if err := checkState(state, output); err != nil {
+		if err := checkState(state, parsed.disableCapture, output); err != nil {
 			fmt.Fprintln(errorsOutput, err)
 			return 1
 		}
@@ -68,7 +69,7 @@ func run(parent context.Context, args []string, output, errorsOutput io.Writer) 
 	for _, warning := range state.warnings {
 		logger.Printf("persistence unavailable: %v", warning)
 	}
-	if err := runDaemon(parent, state, logger); err != nil {
+	if err := runDaemon(parent, state, logger, parsed.disableCapture); err != nil {
 		logger.Print(err)
 		return 1
 	}
@@ -82,6 +83,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.StringVar(&parsed.keyFile, "key-file", "", help("use a private 32-byte key file instead of Secret Service"))
 	flags.StringVar(&parsed.stateDir, "state-dir", "", help("clipboard state directory"))
 	flags.BoolVar(&parsed.check, "check", false, help("check persistence and runtime configuration, then exit"))
+	flags.BoolVar(&parsed.disableCapture, "disable-capture", false, help("disable clipboard history capture; copy and existing history remain available"))
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -148,7 +150,7 @@ func loadState(stateDir, keyFile string) (runtimeState, error) {
 	return state, nil
 }
 
-func checkState(state runtimeState, output io.Writer) error {
+func checkState(state runtimeState, disableCapture bool, output io.Writer) error {
 	socketPath, err := daemon.DefaultSocketPath()
 	if err != nil {
 		return fmt.Errorf("resolve clipboard socket: %w", err)
@@ -157,19 +159,25 @@ func checkState(state runtimeState, output io.Writer) error {
 	fmt.Fprintf(output, "socket: %s\n", socketPath)
 	fmt.Fprintf(output, "entries: %d\n", state.history.Count())
 	fmt.Fprintf(output, "persistence: %s\n", state.persistence)
+	captureState := "enabled"
+	if disableCapture {
+		captureState = "disabled"
+	}
+	fmt.Fprintf(output, "capture: %s\n", captureState)
 	for _, warning := range state.warnings {
 		fmt.Fprintf(output, "warning: %v\n", warning)
 	}
 	return nil
 }
 
-func runDaemon(parent context.Context, state runtimeState, logger *log.Logger) error {
+func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, disableCapture bool) error {
 	var owner *wayland.Owner
 	service := daemon.NewService(daemon.Options{
-		History:     state.history,
-		Store:       state.store,
-		Persistence: state.persistence,
-		Wayland:     protocol.WaylandUnavailable,
+		History:        state.history,
+		Store:          state.store,
+		Persistence:    state.persistence,
+		Wayland:        protocol.WaylandUnavailable,
+		DisableCapture: disableCapture,
 		Restore: func(ctx context.Context, item history.Item) error {
 			if owner == nil {
 				return daemon.ErrRestoreUnavailable

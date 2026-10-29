@@ -26,6 +26,16 @@ func TestResolveStateDirRequiresAbsoluteOverride(t *testing.T) {
 	}
 }
 
+func TestParseOptionsDisablesCapture(t *testing.T) {
+	parsed, err := parseOptions([]string{"--disable-capture"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.disableCapture {
+		t.Fatal("disable-capture = false, want true")
+	}
+}
+
 func TestLoadStateReloadsEncryptedHistoryFromKeyFile(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	keyDir := t.TempDir()

@@ -88,6 +88,27 @@ arguments exit 2.
 | `--check` | Print state and exit |
 | `--key-file <path>` | Use a key file instead of the Secret Service |
 | `--state-dir <path>` | Override the state directory (must be absolute) |
+| `--disable-capture` | Stop adding clipboard entries while keeping copy and existing history available |
+
+To pause history capture while keeping clipboard copy active, run
+`systemctl --user edit sysc-clipboard.service` and append `--disable-capture` to its `ExecStart`.
+For source installs, use this override:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=%h/.local/bin/sysc-clipboard --disable-capture
+```
+
+Reload and restart the service to apply the flag:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user restart sysc-clipboard.service
+```
+
+Use the executable path from your installed unit. Remove the flag and restart the service to resume
+history capture. Existing encrypted history remains available while capture is disabled.
 
 The state directory is `$XDG_STATE_HOME/sysc-clipboard`, falling back to
 `~/.local/state/sysc-clipboard`.
