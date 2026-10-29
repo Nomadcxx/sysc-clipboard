@@ -52,6 +52,8 @@ type Options struct {
 	Store       *store.Store
 	Persistence protocol.PersistenceState
 	Wayland     protocol.WaylandState
+	// DisableCapture keeps clipboard operations live without adding history.
+	DisableCapture bool
 	// Restore runs outside the reducer and must return when its context is canceled.
 	Restore func(context.Context, history.Item) error
 }
@@ -73,6 +75,7 @@ type Service struct {
 	restoreResults   chan restoreResult
 	thumbnailize     func(history.Item, uint16) (protocol.Thumbnail, error)
 	restore          func(context.Context, history.Item) error
+	disableCapture   bool
 }
 
 type requestKind uint8
@@ -186,6 +189,7 @@ func NewService(options Options) *Service {
 		restoreResults:   make(chan restoreResult, 1),
 		thumbnailize:     makeThumbnail,
 		restore:          options.Restore,
+		disableCapture:   options.DisableCapture,
 	}
 	service.workers.Add(2)
 	go service.runThumbnailWorker()
@@ -206,6 +210,9 @@ func (service *Service) Close() {
 
 // Capture submits a completed Wayland offer read to the reducer.
 func (service *Service) Capture(ctx context.Context, capture history.Capture) error {
+	if service.disableCapture {
+		return nil
+	}
 	capture.Payload = bytes.Clone(capture.Payload)
 	capture.OfferedMIME = append([]string(nil), capture.OfferedMIME...)
 	return service.submit(ctx, serviceRequest{
