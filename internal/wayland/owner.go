@@ -196,9 +196,10 @@ type readResult struct {
 }
 
 type selectionBackup struct {
-	kind    protocol.Kind
-	mime    string
-	payload []byte
+	kind        protocol.Kind
+	mime        string
+	offeredMIME []string
+	payload     []byte
 }
 
 type sourceState struct {
@@ -595,9 +596,10 @@ func (owner *Owner) acceptPayload(result readResult) {
 	}
 	backupPayload := bytes.Clone(result.payload)
 	owner.backup = &selectionBackup{
-		kind:    result.kind,
-		mime:    result.mime,
-		payload: backupPayload,
+		kind:        result.kind,
+		mime:        result.mime,
+		offeredMIME: append([]string(nil), result.offered...),
+		payload:     backupPayload,
 	}
 	if owner.options.Capture != nil {
 		capture := history.Capture{
@@ -618,14 +620,14 @@ func (owner *Owner) restore(metadata protocol.Entry, payload []byte) error {
 	if owner.manager == nil || owner.device == nil || owner.finished != nil {
 		return ErrOwnerUnavailable
 	}
-	return owner.offerPayload(metadata.Kind, metadata.MIME, payload)
+	return owner.offerPayload(metadata, payload)
 }
 
-func (owner *Owner) offerPayload(kind protocol.Kind, mime string, payload []byte) error {
+func (owner *Owner) offerPayload(metadata protocol.Entry, payload []byte) error {
 	if len(owner.sources) >= maxOutgoingSources {
 		return ErrSourceLimit
 	}
-	mimes := restoreMIMEs(protocol.Entry{Kind: kind, MIME: mime})
+	mimes := restoreMIMEs(metadata)
 	if len(mimes) == 0 || len(payload) == 0 {
 		return ErrOwnerUnavailable
 	}
@@ -661,7 +663,12 @@ func (owner *Owner) offerPayload(kind protocol.Kind, mime string, payload []byte
 	}
 	owner.awaitingSource = source.id()
 	if len(payload) <= maxSelectionBackupBytes {
-		owner.backup = &selectionBackup{kind: kind, mime: mime, payload: payload}
+		owner.backup = &selectionBackup{
+			kind:        metadata.Kind,
+			mime:        metadata.MIME,
+			offeredMIME: append([]string(nil), mimes...),
+			payload:     payload,
+		}
 	}
 	return nil
 }
@@ -707,7 +714,7 @@ func (owner *Owner) adoptBackup() {
 		return
 	}
 	backup := owner.backup
-	_ = owner.offerPayload(backup.kind, backup.mime, backup.payload)
+	_ = owner.offerPayload(protocol.Entry{Kind: backup.kind, MIME: backup.mime, OfferedMIME: backup.offeredMIME}, backup.payload)
 }
 
 func (owner *Owner) cancelRead() {
@@ -918,6 +925,9 @@ func selectCaptureMIME(offered []string) (kind protocol.Kind, mime string, ok bo
 }
 
 func restoreMIMEs(entry protocol.Entry) []string {
+	if len(entry.OfferedMIME) > 0 {
+		return append([]string(nil), entry.OfferedMIME...)
+	}
 	if entry.MIME == "" {
 		return nil
 	}
