@@ -21,6 +21,7 @@ var (
 	ErrLimit           = errors.New("clipboard history limit exceeded")
 	ErrStaleGeneration = errors.New("stale clipboard capture generation")
 	ErrNotFound        = errors.New("clipboard history entry not found")
+	ErrInvalidDelete   = errors.New("invalid clipboard delete batch")
 	ErrInvalidScope    = errors.New("invalid clipboard history clear scope")
 )
 
@@ -259,6 +260,42 @@ func (history *History) Delete(id string) ([]protocol.Change, error) {
 	history.entries = append(history.entries[:index], history.entries[index+1:]...)
 	history.totalBytes -= removed.metadata.Size
 	return []protocol.Change{changeFor(protocol.ChangeRemoved, removed)}, nil
+}
+
+func (history *History) DeleteMany(ids []string) ([]protocol.Change, error) {
+	if len(ids) == 0 || len(ids) > protocol.MaxEntries {
+		return nil, ErrInvalidDelete
+	}
+
+	selected := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return nil, ErrInvalidDelete
+		}
+		if _, duplicate := selected[id]; duplicate {
+			return nil, ErrInvalidDelete
+		}
+		selected[id] = struct{}{}
+	}
+
+	kept := make([]record, 0, len(history.entries))
+	changes := make([]protocol.Change, 0, len(ids))
+	var totalBytes uint64
+	for _, entry := range history.entries {
+		if _, remove := selected[entry.metadata.ID]; remove {
+			delete(selected, entry.metadata.ID)
+			changes = append(changes, changeFor(protocol.ChangeRemoved, entry))
+			continue
+		}
+		kept = append(kept, entry)
+		totalBytes += entry.metadata.Size
+	}
+	if len(selected) > 0 {
+		return nil, ErrNotFound
+	}
+	history.entries = kept
+	history.totalBytes = totalBytes
+	return changes, nil
 }
 
 func (history *History) Clear(scope protocol.ClearScope) ([]protocol.Change, error) {

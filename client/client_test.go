@@ -23,11 +23,16 @@ func TestClientHandshakesAndPublishesSnapshot(t *testing.T) {
 			return
 		}
 		copySupported := false
+		deleteManySupported := false
 		for _, capability := range hello.Hello.Capabilities {
 			copySupported = copySupported || capability == "copy"
+			deleteManySupported = deleteManySupported || capability == "delete-many"
 		}
 		if !copySupported {
 			t.Errorf("client hello capabilities = %v, want copy", hello.Hello.Capabilities)
+		}
+		if !deleteManySupported {
+			t.Errorf("client hello capabilities = %v, want delete-many", hello.Hello.Capabilities)
 		}
 		_ = protocol.WriteMessage(connection, protocol.Message{
 			Version: protocol.Version,
@@ -392,6 +397,77 @@ func TestClientCopySendsWhenServerAdvertisesCapability(t *testing.T) {
 	if update.Message.Type != protocol.TypeAck {
 		t.Fatalf("copy acknowledgement = %+v", update.Message)
 	}
+}
+
+func TestClientDeleteManyRequiresCapabilityAndSendsOneBatch(t *testing.T) {
+	t.Run("supported", func(t *testing.T) {
+		commands := make(chan protocol.Message, 1)
+		path := startClientServer(t, func(connection net.Conn) {
+			if !readHello(connection) {
+				return
+			}
+			_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeHello, Hello: &protocol.Hello{Capabilities: []string{"delete-many"}}})
+			_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &protocol.Snapshot{Persistence: protocol.PersistenceUnavailable, Wayland: protocol.WaylandUnavailable}})
+			message, err := protocol.ReadMessage(connection)
+			if err == nil {
+				commands <- message
+				_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeAck, Ack: &protocol.Ack{RequestID: message.RequestID}})
+			}
+		})
+
+		client := newTestClient(t, path)
+		cancel, done := startClient(t, client)
+		defer func() {
+			cancel()
+			<-done
+		}()
+		_ = nextUpdate(t, client.Updates())
+		if err := client.DeleteMany([]string{"first", "second"}); err != nil {
+			t.Fatalf("DeleteMany: %v", err)
+		}
+		select {
+		case message := <-commands:
+			if message.Type != protocol.TypeDeleteMany || len(message.IDs) != 2 || message.IDs[0] != "first" || message.IDs[1] != "second" {
+				t.Fatalf("delete_many command = %+v", message)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("server received no delete_many command")
+		}
+		if update := nextUpdate(t, client.Updates()); update.Message.Type != protocol.TypeAck {
+			t.Fatalf("delete_many acknowledgement = %+v", update.Message)
+		}
+	})
+
+	t.Run("unsupported", func(t *testing.T) {
+		commands := make(chan protocol.Message, 1)
+		path := startClientServer(t, func(connection net.Conn) {
+			if !readHello(connection) {
+				return
+			}
+			_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeHello, Hello: &protocol.Hello{Capabilities: []string{"delete"}}})
+			_ = protocol.WriteMessage(connection, protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &protocol.Snapshot{Persistence: protocol.PersistenceUnavailable, Wayland: protocol.WaylandUnavailable}})
+			message, err := protocol.ReadMessage(connection)
+			if err == nil {
+				commands <- message
+			}
+		})
+
+		client := newTestClient(t, path)
+		cancel, done := startClient(t, client)
+		defer func() {
+			cancel()
+			<-done
+		}()
+		_ = nextUpdate(t, client.Updates())
+		if err := client.DeleteMany([]string{"first", "second"}); !errors.Is(err, ErrDeleteManyUnsupported) {
+			t.Fatalf("DeleteMany error = %v, want %v", err, ErrDeleteManyUnsupported)
+		}
+		select {
+		case message := <-commands:
+			t.Fatalf("unsupported batch was sent: %+v", message)
+		case <-time.After(30 * time.Millisecond):
+		}
+	})
 }
 
 func TestRestoreWithRequestIDReturnsQueuedID(t *testing.T) {

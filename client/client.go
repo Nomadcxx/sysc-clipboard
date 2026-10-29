@@ -14,11 +14,13 @@ import (
 )
 
 var (
-	ErrClientClosed     = errors.New("clipboard client is closed")
-	ErrClientRunning    = errors.New("clipboard client is already running")
-	ErrCommandQueueFull = errors.New("clipboard client command queue is full")
-	ErrRevisionGap      = errors.New("clipboard client revision gap")
-	ErrCopyUnsupported  = errors.New("clipboard daemon does not support copy")
+	ErrClientClosed          = errors.New("clipboard client is closed")
+	ErrClientRunning         = errors.New("clipboard client is already running")
+	ErrCommandQueueFull      = errors.New("clipboard client command queue is full")
+	ErrRevisionGap           = errors.New("clipboard client revision gap")
+	ErrCopyUnsupported       = errors.New("clipboard daemon does not support copy")
+	ErrDeleteManyUnavailable = errors.New("clipboard daemon is not connected")
+	ErrDeleteManyUnsupported = errors.New("clipboard daemon does not support batch delete")
 )
 
 const (
@@ -161,7 +163,7 @@ func (client *Client) handshake(ctx context.Context, connection net.Conn) (proto
 	if err := writeMessage(connection, protocol.Message{
 		Version: protocol.Version,
 		Type:    protocol.TypeHello,
-		Hello:   &protocol.Hello{Capabilities: []string{"copy", "restore", "pin", "delete", "clear", "thumbnail", "resync"}},
+		Hello:   &protocol.Hello{Capabilities: []string{"copy", "restore", "pin", "delete", "delete-many", "clear", "thumbnail", "resync"}},
 	}); err != nil {
 		return protocol.Snapshot{}, err
 	}
@@ -232,8 +234,18 @@ func (client *Client) serveConnection(ctx context.Context, connection net.Conn) 
 		case <-ctx.Done():
 			return ctx.Err()
 		case command := <-client.commands:
-			if command.Type == protocol.TypeCopy {
-				_, supported := client.capability("copy")
+			unsupportedCapability := ""
+			unsupportedMessage := ""
+			switch command.Type {
+			case protocol.TypeCopy:
+				unsupportedCapability = "copy"
+				unsupportedMessage = ErrCopyUnsupported.Error()
+			case protocol.TypeDeleteMany:
+				unsupportedCapability = "delete-many"
+				unsupportedMessage = ErrDeleteManyUnsupported.Error()
+			}
+			if unsupportedCapability != "" {
+				_, supported := client.capability(unsupportedCapability)
 				if !supported {
 					client.emit(protocol.Message{
 						Version:   protocol.Version,
@@ -241,7 +253,7 @@ func (client *Client) serveConnection(ctx context.Context, connection net.Conn) 
 						RequestID: command.RequestID,
 						Error: &protocol.ErrorBody{
 							Code:      protocol.ErrorUnsupported,
-							Message:   ErrCopyUnsupported.Error(),
+							Message:   unsupportedMessage,
 							RequestID: command.RequestID,
 						},
 					}, true)
@@ -430,6 +442,23 @@ func (client *Client) Delete(id string) error {
 	return client.enqueue(client.newCommand(protocol.TypeDelete, id, nil, "", 0))
 }
 
+// DeleteMany queues an atomic delete batch when the connected daemon supports it.
+func (client *Client) DeleteMany(ids []string) error {
+	if err := protocol.ValidateMessage(protocol.Message{Version: protocol.Version, Type: protocol.TypeDeleteMany, IDs: ids}); err != nil {
+		return err
+	}
+	connected, supported := client.capability("delete-many")
+	if !connected {
+		return ErrDeleteManyUnavailable
+	}
+	if !supported {
+		return ErrDeleteManyUnsupported
+	}
+	message := client.newCommand(protocol.TypeDeleteMany, "", nil, "", 0)
+	message.IDs = append([]string(nil), ids...)
+	return client.enqueue(message)
+}
+
 func (client *Client) Clear(scope protocol.ClearScope) error {
 	return client.enqueue(client.newCommand(protocol.TypeClear, "", nil, scope, 0))
 }
@@ -530,6 +559,7 @@ func cloneEntry(entry protocol.Entry) protocol.Entry {
 
 func cloneMessage(message protocol.Message) protocol.Message {
 	cloned := message
+	cloned.IDs = append([]string(nil), message.IDs...)
 	if message.Pinned != nil {
 		pinned := *message.Pinned
 		cloned.Pinned = &pinned

@@ -138,8 +138,10 @@ Run inside an existing Go module:
 go get github.com/Nomadcxx/sysc-clipboard/client
 ```
 
-The client package offers `Copy`, `Restore`, `Pin`, `Delete`, `Clear`, `Thumbnail` and `Resync`, plus
-an `Updates()` stream of snapshots, deltas and command responses.
+The client package offers `Copy`, `Restore`, `Pin`, `Delete`, `DeleteMany`, `Clear`, `Thumbnail` and
+`Resync`, plus an `Updates()` stream of snapshots, deltas and command responses. `DeleteMany` checks
+for the daemon's `delete-many` capability and returns `client.ErrDeleteManyUnsupported` when the
+daemon lacks it. Single-entry deletion remains available.
 
 ## History and storage
 

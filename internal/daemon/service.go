@@ -694,6 +694,13 @@ func (state *reducerState) execute(message protocol.Message) protocol.Message {
 		}
 		state.commit(changes)
 		return acknowledgement(message.RequestID, state.revision)
+	case protocol.TypeDeleteMany:
+		changes, err := state.history.DeleteMany(message.IDs)
+		if err != nil {
+			return historyError(message.RequestID, err)
+		}
+		state.commit(changes)
+		return acknowledgement(message.RequestID, state.revision)
 	case protocol.TypeClear:
 		changes, err := state.history.Clear(message.Scope)
 		if err != nil {

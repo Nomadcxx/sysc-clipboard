@@ -183,6 +183,64 @@ func TestServiceCommandsRestorePinDeleteAndClear(t *testing.T) {
 	}
 }
 
+func TestServiceDeleteManyPublishesOneAtomicDelta(t *testing.T) {
+	svc := NewService(Options{
+		History:     history.New(1),
+		Persistence: protocol.PersistenceUnavailable,
+		Wayland:     protocol.WaylandReady,
+	})
+	t.Cleanup(svc.Close)
+	sub, err := svc.Subscribe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sub.Close)
+	_ = nextMessage(t, sub.Updates)
+	for _, value := range []string{"oldest", "middle", "newest"} {
+		if err := svc.Capture(context.Background(), textCapture(1, value, time.Now())); err != nil {
+			t.Fatal(err)
+		}
+		_ = nextMessage(t, sub.Updates)
+	}
+
+	before, err := svc.CurrentSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := svc.Execute(context.Background(), protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeDeleteMany, RequestID: "delete-many-1",
+		IDs: []string{before.Entries[1].ID, before.Entries[0].ID},
+	})
+	if response.Type != protocol.TypeAck || response.Ack == nil || response.Ack.RequestID != "delete-many-1" {
+		t.Fatalf("delete_many response = %+v", response)
+	}
+	delta := nextMessage(t, sub.Updates)
+	if delta.Type != protocol.TypeDelta || delta.Delta == nil || delta.Delta.Revision != before.Revision+1 || len(delta.Delta.Changes) != 2 {
+		t.Fatalf("delete_many delta = %+v", delta)
+	}
+	if delta.Delta.Changes[0].ID != before.Entries[0].ID || delta.Delta.Changes[1].ID != before.Entries[1].ID {
+		t.Fatalf("delete_many changes = %+v, want history order", delta.Delta.Changes)
+	}
+
+	response = svc.Execute(context.Background(), protocol.Message{
+		Version: protocol.Version, Type: protocol.TypeDeleteMany, RequestID: "delete-many-missing",
+		IDs: []string{before.Entries[2].ID, "missing"},
+	})
+	if response.Type != protocol.TypeError || response.Error == nil || response.Error.Code != protocol.ErrorNotFound {
+		t.Fatalf("missing delete_many response = %+v", response)
+	}
+	after, err := svc.CurrentSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision+1 || len(after.Entries) != 1 || after.Entries[0].ID != before.Entries[2].ID {
+		t.Fatalf("missing delete_many changed history: %+v", after)
+	}
+	if message := nextIfAvailable(sub.Updates); message != nil {
+		t.Fatalf("failed batch published %v", *message)
+	}
+}
+
 func TestServiceCopyUsesWaylandRestoreWithoutChangingHistory(t *testing.T) {
 	var copied []byte
 	var metadata protocol.Entry

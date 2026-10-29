@@ -59,11 +59,16 @@ func TestServerPrivateSocketHandshakeAndSnapshot(t *testing.T) {
 		t.Fatalf("hello = %+v", hello)
 	}
 	copySupported := false
+	deleteManySupported := false
 	for _, capability := range hello.Hello.Capabilities {
 		copySupported = copySupported || capability == "copy"
+		deleteManySupported = deleteManySupported || capability == "delete-many"
 	}
 	if !copySupported {
 		t.Fatalf("server hello capabilities = %v, want copy", hello.Hello.Capabilities)
+	}
+	if !deleteManySupported {
+		t.Fatalf("server hello capabilities = %v, want delete-many", hello.Hello.Capabilities)
 	}
 	snapshot, err := protocol.ReadMessage(conn)
 	if err != nil {

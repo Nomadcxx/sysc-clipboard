@@ -228,6 +228,39 @@ func TestHistoryRejectsPerEntryLimitsEmptyTextAndStaleGeneration(t *testing.T) {
 	}
 }
 
+func TestDeleteManyIsAtomicAndReturnsHistoryOrder(t *testing.T) {
+	h := New(1)
+	when := time.Unix(1, 0).UTC()
+	for index, value := range []string{"oldest", "middle", "newest"} {
+		if _, err := h.Capture(capture(1, protocol.KindText, "text/plain", value, when.Add(time.Duration(index)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := h.Snapshot()
+
+	changes, err := h.DeleteMany([]string{entries[2].ID, entries[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 2 || changes[0].ID != entries[0].ID || changes[1].ID != entries[2].ID || changes[0].Kind != protocol.ChangeRemoved || changes[1].Kind != protocol.ChangeRemoved {
+		t.Fatalf("delete changes = %+v, want selected entries in history order", changes)
+	}
+	if got := previews(h.Snapshot()); !equalStrings(got, []string{"middle"}) {
+		t.Fatalf("remaining history = %v", got)
+	}
+
+	before := h.Snapshot()
+	if _, err := h.DeleteMany([]string{before[0].ID, before[0].ID}); !errors.Is(err, ErrInvalidDelete) {
+		t.Fatalf("duplicate ID error = %v, want ErrInvalidDelete", err)
+	}
+	if _, err := h.DeleteMany([]string{before[0].ID, "missing"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing ID error = %v, want ErrNotFound", err)
+	}
+	if got := previews(h.Snapshot()); !equalStrings(got, previews(before)) {
+		t.Fatalf("failed batch changed history: %v", got)
+	}
+}
+
 func TestTextPreviewIsUTF8SafeAndBounded(t *testing.T) {
 	h := New(1)
 	payload := strings.Repeat("界", protocol.MaxPreviewBytes)
