@@ -25,6 +25,7 @@ type options struct {
 	stateDir       string
 	check          bool
 	disableCapture bool
+	limits         history.Limits
 }
 
 type runtimeState struct {
@@ -32,6 +33,7 @@ type runtimeState struct {
 	history     *history.History
 	store       *store.Store
 	persistence protocol.PersistenceState
+	limits      history.Limits
 	warnings    []error
 }
 
@@ -52,7 +54,7 @@ func run(parent context.Context, args []string, output, errorsOutput io.Writer) 
 		return 2
 	}
 
-	state, err := loadState(parsed.stateDir, parsed.keyFile)
+	state, err := loadState(parsed.stateDir, parsed.keyFile, parsed.limits)
 	if err != nil {
 		fmt.Fprintln(errorsOutput, err)
 		return 1
@@ -77,20 +79,39 @@ func run(parent context.Context, args []string, output, errorsOutput io.Writer) 
 }
 
 func parseOptions(args []string, output io.Writer) (options, error) {
-	var parsed options
+	defaults := history.DefaultLimits()
+	parsed := options{limits: defaults}
 	flags := flag.NewFlagSet("sysc-clipboard", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.StringVar(&parsed.keyFile, "key-file", "", help("use a private 32-byte key file instead of Secret Service"))
 	flags.StringVar(&parsed.stateDir, "state-dir", "", help("clipboard state directory"))
 	flags.BoolVar(&parsed.check, "check", false, help("check persistence and runtime configuration, then exit"))
 	flags.BoolVar(&parsed.disableCapture, "disable-capture", false, help("disable clipboard history capture; copy and existing history remain available"))
+	flags.IntVar(&parsed.limits.MaxEntries, "max-entries", defaults.MaxEntries, help("maximum retained history entries"))
+	flags.Uint64Var(&parsed.limits.MaxTotalBytes, "max-total-bytes", defaults.MaxTotalBytes, help("maximum combined history payload bytes"))
+	flags.Uint64Var(&parsed.limits.MaxTextBytes, "max-text-bytes", defaults.MaxTextBytes, help("maximum bytes in a captured text entry"))
+	flags.Uint64Var(&parsed.limits.MaxImageBytes, "max-image-bytes", defaults.MaxImageBytes, help("maximum bytes in a captured image entry"))
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
 	if flags.NArg() != 0 {
 		return options{}, fmt.Errorf(help("unexpected argument %q"), flags.Arg(0))
 	}
+	if err := validateLimits(parsed.limits); err != nil {
+		return options{}, err
+	}
 	return parsed, nil
+}
+
+func validateLimits(limits history.Limits) error {
+	defaults := history.DefaultLimits()
+	if limits.MaxEntries < 1 || limits.MaxEntries > defaults.MaxEntries ||
+		limits.MaxTotalBytes < 1 || limits.MaxTotalBytes > defaults.MaxTotalBytes ||
+		limits.MaxTextBytes < 1 || limits.MaxTextBytes > defaults.MaxTextBytes ||
+		limits.MaxImageBytes < 1 || limits.MaxImageBytes > defaults.MaxImageBytes {
+		return errors.New(help("history caps must be positive and within the protocol limits"))
+	}
+	return nil
 }
 
 func resolveStateDir(override string) (string, error) {
@@ -103,10 +124,11 @@ func resolveStateDir(override string) (string, error) {
 	return store.DefaultStateDir()
 }
 
-func loadState(stateDir, keyFile string) (runtimeState, error) {
+func loadState(stateDir, keyFile string, limits history.Limits) (runtimeState, error) {
 	state := runtimeState{
-		history:     history.New(0),
+		history:     history.NewWithLimits(0, limits),
 		persistence: protocol.PersistenceUnavailable,
+		limits:      limits,
 	}
 	root, err := resolveStateDir(stateDir)
 	if err != nil {
@@ -159,6 +181,10 @@ func checkState(state runtimeState, disableCapture bool, output io.Writer) error
 	fmt.Fprintf(output, "socket: %s\n", socketPath)
 	fmt.Fprintf(output, "entries: %d\n", state.history.Count())
 	fmt.Fprintf(output, "persistence: %s\n", state.persistence)
+	fmt.Fprintf(output, "max-entries: %d\n", state.limits.MaxEntries)
+	fmt.Fprintf(output, "max-total-bytes: %d\n", state.limits.MaxTotalBytes)
+	fmt.Fprintf(output, "max-text-bytes: %d\n", state.limits.MaxTextBytes)
+	fmt.Fprintf(output, "max-image-bytes: %d\n", state.limits.MaxImageBytes)
 	captureState := "enabled"
 	if disableCapture {
 		captureState = "disabled"
@@ -188,6 +214,9 @@ func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, d
 	defer service.Close()
 
 	serviceOptions := wayland.OwnerOptions{
+		MaxTextBytes:  state.limits.MaxTextBytes,
+		MaxImageBytes: state.limits.MaxImageBytes,
+		MaxTotalBytes: state.limits.MaxTotalBytes,
 		Capture: func(ctx context.Context, capture history.Capture) error {
 			return service.Capture(ctx, capture)
 		},

@@ -78,10 +78,9 @@ sysc-clipboard has no interface of its own; sysc-shell draws the history. To ins
 sysc-clipboard --check
 ```
 
-It prints the state directory, socket, entry count and persistence mode (`durable`, `volatile` or
-`unavailable`), then exits 0 or 1 without starting the daemon. This checks stored history and
-configuration; it does not connect to a running daemon or check Wayland availability. Invalid
-arguments exit 2.
+It prints the state directory, socket, entry count, persistence mode (`durable`, `volatile` or
+`unavailable`), capture mode and active history caps, then exits 0 or 1 without starting the daemon.
+It does not connect to a running daemon or check Wayland availability. Invalid arguments exit 2.
 
 | Flag | Meaning |
 |---|---|
@@ -89,6 +88,15 @@ arguments exit 2.
 | `--key-file <path>` | Use a key file instead of the Secret Service |
 | `--state-dir <path>` | Override the state directory (must be absolute) |
 | `--disable-capture` | Stop adding clipboard entries while keeping copy and existing history available |
+| `--max-entries <n>` | Maximum retained entries (default and ceiling: 100) |
+| `--max-total-bytes <n>` | Maximum combined payload bytes (default and ceiling: 268435456) |
+| `--max-text-bytes <n>` | Maximum bytes in a text entry (default and ceiling: 4194304) |
+| `--max-image-bytes <n>` | Maximum bytes in an image entry (default and ceiling: 33554432) |
+
+Set positive lower values in the user-service override to reduce these caps. Byte flags use decimal
+bytes. The daemon removes unpinned entries that exceed a lower per-entry cap and evicts the oldest
+unpinned entries to meet count and total-byte caps. Pinned entries remain. If they alone exceed a cap,
+new captures are rejected until you unpin or remove enough entries. `--check` prints the active values.
 
 To pause history capture while keeping clipboard copy active, run
 `systemctl --user edit sysc-clipboard.service` and append `--disable-capture` to its `ExecStart`.
@@ -112,6 +120,15 @@ history capture. Existing encrypted history remains available while capture is d
 
 The state directory is `$XDG_STATE_HOME/sysc-clipboard`, falling back to
 `~/.local/state/sysc-clipboard`.
+
+To lower the caps, add the flags to the same service override. This keeps at most 50 entries and
+128 MiB of payload data:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=%h/.local/bin/sysc-clipboard --max-entries=50 --max-total-bytes=134217728
+```
 
 ## Clients
 

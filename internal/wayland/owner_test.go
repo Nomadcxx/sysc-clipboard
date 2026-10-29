@@ -1,7 +1,6 @@
 package wayland
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -261,28 +260,40 @@ func TestOwnerSerializesCapturePersistence(t *testing.T) {
 	}
 }
 
-func TestOwnerUsesKindLimitBeforeCapture(t *testing.T) {
-	backend := newFakeBackend()
-	captures := make(chan history.Capture, 1)
-	owner := runTestOwner(t, backend, OwnerOptions{
-		Capture: func(_ context.Context, capture history.Capture) error {
-			captures <- capture
-			return nil
-		},
-	})
-	_ = owner
+func TestOwnerUsesConfiguredLimitsBeforeCapture(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		maxTextBytes  uint64
+		maxTotalBytes uint64
+	}{
+		{name: "entry limit", maxTextBytes: 3, maxTotalBytes: 10},
+		{name: "total limit", maxTextBytes: 10, maxTotalBytes: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			captures := make(chan history.Capture, 1)
+			runTestOwner(t, backend, OwnerOptions{
+				MaxTextBytes:  test.maxTextBytes,
+				MaxTotalBytes: test.maxTotalBytes,
+				Capture: func(_ context.Context, capture history.Capture) error {
+					captures <- capture
+					return nil
+				},
+			})
 
-	offer := &fakeOffer{idValue: 34, payload: bytes.Repeat([]byte("x"), protocol.MaxTextBytes+1)}
-	backend.push(func() {
-		backend.device.emitDataOffer(offer)
-		offer.emitMIME("text/plain")
-		backend.device.emitSelection(offer)
-	})
-	waitFor(t, offer.isDestroyed)
-	select {
-	case capture := <-captures:
-		t.Fatalf("oversized text was captured: %d bytes", len(capture.Payload))
-	case <-time.After(100 * time.Millisecond):
+			offer := &fakeOffer{idValue: 34, payload: []byte("four")}
+			backend.push(func() {
+				backend.device.emitDataOffer(offer)
+				offer.emitMIME("text/plain")
+				backend.device.emitSelection(offer)
+			})
+			waitFor(t, offer.isDestroyed)
+			select {
+			case capture := <-captures:
+				t.Fatalf("oversized text was captured: %d bytes", len(capture.Payload))
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
 	}
 }
 

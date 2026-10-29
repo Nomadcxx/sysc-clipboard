@@ -36,7 +36,52 @@ func TestParseOptionsDisablesCapture(t *testing.T) {
 	}
 }
 
-func TestLoadStateReloadsEncryptedHistoryFromKeyFile(t *testing.T) {
+func TestParseOptionsAcceptsHistoryCaps(t *testing.T) {
+	parsed, err := parseOptions([]string{
+		"--max-entries=40",
+		"--max-total-bytes=67108864",
+		"--max-text-bytes=1048576",
+		"--max-image-bytes=8388608",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := history.Limits{MaxEntries: 40, MaxTotalBytes: 67108864, MaxTextBytes: 1048576, MaxImageBytes: 8388608}
+	if parsed.limits != want {
+		t.Fatalf("limits = %+v, want %+v", parsed.limits, want)
+	}
+}
+
+func TestParseOptionsDefaultsToProtocolHistoryCaps(t *testing.T) {
+	parsed, err := parseOptions(nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.limits != history.DefaultLimits() {
+		t.Fatalf("limits = %+v, want defaults %+v", parsed.limits, history.DefaultLimits())
+	}
+}
+
+func TestParseOptionsRejectsHistoryCapsOutsideProtocolLimits(t *testing.T) {
+	for _, argument := range []string{
+		"--max-entries=0",
+		"--max-entries=101",
+		"--max-total-bytes=0",
+		"--max-total-bytes=268435457",
+		"--max-text-bytes=0",
+		"--max-text-bytes=4194305",
+		"--max-image-bytes=0",
+		"--max-image-bytes=33554433",
+	} {
+		t.Run(argument, func(t *testing.T) {
+			if _, err := parseOptions([]string{argument}, &bytes.Buffer{}); err == nil {
+				t.Fatalf("parseOptions(%q) succeeded, want an out-of-range error", argument)
+			}
+		})
+	}
+}
+
+func TestLoadStateAppliesCapsToEncryptedHistoryFromKeyFile(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	keyDir := t.TempDir()
 	if err := os.Chmod(keyDir, 0700); err != nil {
@@ -56,6 +101,15 @@ func TestLoadStateReloadsEncryptedHistoryFromKeyFile(t *testing.T) {
 		Generation: 1,
 		Kind:       protocol.KindText,
 		MIME:       "text/plain",
+		Payload:    []byte("older"),
+		CapturedAt: time.Unix(1, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := original.Capture(history.Capture{
+		Generation: 1,
+		Kind:       protocol.KindText,
+		MIME:       "text/plain",
 		Payload:    []byte("persisted clipboard"),
 		CapturedAt: time.Unix(1, 0).UTC(),
 	}); err != nil {
@@ -65,7 +119,10 @@ func TestLoadStateReloadsEncryptedHistoryFromKeyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, err := loadState(root, keyPath)
+	limits := history.DefaultLimits()
+	limits.MaxEntries = 1
+	limits.MaxTotalBytes = uint64(len("persisted clipboard"))
+	state, err := loadState(root, keyPath, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,8 +130,29 @@ func TestLoadStateReloadsEncryptedHistoryFromKeyFile(t *testing.T) {
 		t.Fatalf("loaded state = %+v", state)
 	}
 	items := state.history.Items()
-	if len(items) != 1 || string(items[0].Payload()) != "persisted clipboard" {
+	if len(items) != 1 || string(items[0].Payload()) != "persisted clipboard" || state.limits != limits {
 		t.Fatalf("loaded history = %+v", items)
+	}
+}
+
+func TestCheckStateReportsConfiguredHistoryCaps(t *testing.T) {
+	runtimeDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	limits := history.Limits{MaxEntries: 40, MaxTotalBytes: 64 << 20, MaxTextBytes: 1 << 20, MaxImageBytes: 8 << 20}
+	state := runtimeState{
+		root:        filepath.Join(t.TempDir(), "state"),
+		history:     history.NewWithLimits(0, limits),
+		persistence: protocol.PersistenceUnavailable,
+		limits:      limits,
+	}
+	var output bytes.Buffer
+	if err := checkState(state, false, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"max-entries: 40", "max-total-bytes: 67108864", "max-text-bytes: 1048576", "max-image-bytes: 8388608"} {
+		if !bytes.Contains(output.Bytes(), []byte(expected)) {
+			t.Fatalf("check output %q is missing %q", output.String(), expected)
+		}
 	}
 }
 
@@ -100,7 +178,7 @@ func TestLoadStateFallsBackToVolatileAfterCorruptManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, err := loadState(root, keyPath)
+	state, err := loadState(root, keyPath, history.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}

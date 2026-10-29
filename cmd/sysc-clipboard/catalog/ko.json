@@ -4,6 +4,11 @@
  "clipboard state directory must be absolute": "클립보드 상태 디렉터리는 절대 경로여야 합니다",
  "dropped %d unreadable clipboard entries": "읽을 수 없는 클립보드 항목 %d개를 삭제했습니다",
  "disable clipboard history capture; copy and existing history remain available": "클립보드 기록 저장을 중지합니다. 복사 기능과 기존 기록은 계속 사용할 수 있습니다",
+ "maximum retained history entries": "기록에 보관할 최대 항목 수",
+ "maximum combined history payload bytes": "기록 전체 페이로드의 최대 바이트 수",
+ "maximum bytes in a captured text entry": "캡처할 텍스트 항목의 최대 바이트 수",
+ "maximum bytes in a captured image entry": "캡처할 이미지 항목의 최대 바이트 수",
+ "history caps must be positive and within the protocol limits": "기록 제한은 양수여야 하며 프로토콜 한도를 넘을 수 없습니다",
  "unexpected argument %q": "예상치 못한 인자 %q",
  "use a private 32-byte key file instead of Secret Service": "Secret Service 대신 32바이트 비공개 키 파일 사용"
 }
