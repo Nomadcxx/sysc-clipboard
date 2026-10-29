@@ -46,6 +46,9 @@ type globalAnnouncement struct {
 }
 
 type OwnerOptions struct {
+	MaxTextBytes  uint64
+	MaxImageBytes uint64
+	MaxTotalBytes uint64
 	// Capture runs serially off the Wayland owner goroutine. The context is
 	// cancelled when the owner stops.
 	Capture func(context.Context, history.Capture) error
@@ -219,6 +222,15 @@ type captureJob struct {
 }
 
 func newOwner(backend waylandBackend, options OwnerOptions) *Owner {
+	if options.MaxTextBytes == 0 {
+		options.MaxTextBytes = protocol.MaxTextBytes
+	}
+	if options.MaxImageBytes == 0 {
+		options.MaxImageBytes = protocol.MaxImageBytes
+	}
+	if options.MaxTotalBytes == 0 {
+		options.MaxTotalBytes = protocol.MaxTotalBytes
+	}
 	return &Owner{
 		backend:       backend,
 		options:       options,
@@ -543,9 +555,12 @@ func (owner *Owner) queueRead(request readRequest, fd int) {
 func (owner *Owner) readLoop() {
 	defer close(owner.readDone)
 	for job := range owner.readJobs {
-		limit := protocol.MaxImageBytes
+		limit := int(owner.options.MaxImageBytes)
 		if job.request.kind == protocol.KindText {
-			limit = protocol.MaxTextBytes
+			limit = int(owner.options.MaxTextBytes)
+		}
+		if uint64(limit) > owner.options.MaxTotalBytes {
+			limit = int(owner.options.MaxTotalBytes)
 		}
 		payload, err := readFD(job.ctx, job.fd, limit)
 		owner.readResults <- readResult{readRequest: job.request, payload: payload, err: err}

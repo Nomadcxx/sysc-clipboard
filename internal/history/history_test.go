@@ -148,6 +148,61 @@ func TestHistoryEvictsOnlyOldestUnpinnedAtEntryAndByteLimits(t *testing.T) {
 	}
 }
 
+func TestConfiguredCapsConstrainCapturesAndTrimRestoredHistory(t *testing.T) {
+	when := time.Unix(1, 0).UTC()
+	source := New(1)
+	for i, payload := range []string{"oversized-old-entry", "new"} {
+		if _, err := source.Capture(capture(1, protocol.KindText, "text/plain", payload, when.Add(time.Duration(i)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	limits := Limits{MaxEntries: 2, MaxTotalBytes: 64, MaxTextBytes: 3, MaxImageBytes: 4}
+	history := NewWithLimits(1, limits)
+	if err := history.Replace(source.Items()); err != nil {
+		t.Fatal(err)
+	}
+	if got := previews(history.Snapshot()); !equalStrings(got, []string{"new"}) {
+		t.Fatalf("restored entries = %v, want only the newest entry", got)
+	}
+
+	for _, item := range []Capture{
+		capture(1, protocol.KindText, "text/plain", "four", when.Add(2*time.Second)),
+		capture(1, protocol.KindImage, "image/png", "12345", when.Add(2*time.Second)),
+	} {
+		if _, err := history.Capture(item); !errors.Is(err, ErrLimit) {
+			t.Fatalf("capture size %d error = %v, want ErrLimit", len(item.Payload), err)
+		}
+	}
+}
+
+func TestReplaceKeepsPinnedEntriesWhenConfiguredCapsAreLowered(t *testing.T) {
+	when := time.Unix(1, 0).UTC()
+	source := New(1)
+	for i, payload := range []string{"one", "two"} {
+		if _, err := source.Capture(capture(1, protocol.KindText, "text/plain", payload, when.Add(time.Duration(i)*time.Second))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range source.Snapshot() {
+		if _, err := source.SetPinned(entry.ID, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	limits := Limits{MaxEntries: 1, MaxTotalBytes: 3, MaxTextBytes: 3, MaxImageBytes: 4}
+	limited := NewWithLimits(1, limits)
+	if err := limited.Replace(source.Items()); err != nil {
+		t.Fatal(err)
+	}
+	if got := limited.Count(); got != 2 {
+		t.Fatalf("pinned entry count = %d, want both pinned entries preserved", got)
+	}
+	if _, err := limited.Capture(capture(1, protocol.KindText, "text/plain", "new", when.Add(2*time.Second))); !errors.Is(err, ErrLimit) {
+		t.Fatalf("capture while pinned entries exceed caps = %v, want ErrLimit", err)
+	}
+}
+
 func TestHistoryRejectsPerEntryLimitsEmptyTextAndStaleGeneration(t *testing.T) {
 	h := New(4)
 	when := time.Unix(1, 0).UTC()

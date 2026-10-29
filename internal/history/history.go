@@ -78,22 +78,42 @@ type record struct {
 	payload  []byte
 }
 
+type Limits struct {
+	MaxEntries    int
+	MaxTotalBytes uint64
+	MaxTextBytes  uint64
+	MaxImageBytes uint64
+}
+
 type History struct {
 	generation uint64
-	maxEntries int
-	maxBytes   uint64
+	limits     Limits
 	entries    []record
 	totalBytes uint64
 }
 
 func New(generation uint64) *History {
-	return newWithLimits(generation, protocol.MaxEntries, protocol.MaxTotalBytes)
+	return NewWithLimits(generation, DefaultLimits())
 }
 
-// newWithLimits keeps algorithm tests small while production uses the fixed
-// protocol limits.
+func DefaultLimits() Limits {
+	return Limits{
+		MaxEntries:    protocol.MaxEntries,
+		MaxTotalBytes: protocol.MaxTotalBytes,
+		MaxTextBytes:  protocol.MaxTextBytes,
+		MaxImageBytes: protocol.MaxImageBytes,
+	}
+}
+
+func NewWithLimits(generation uint64, limits Limits) *History {
+	return &History{generation: generation, limits: limits}
+}
+
 func newWithLimits(generation uint64, maxEntries int, maxBytes uint64) *History {
-	return &History{generation: generation, maxEntries: maxEntries, maxBytes: maxBytes}
+	limits := DefaultLimits()
+	limits.MaxEntries = maxEntries
+	limits.MaxTotalBytes = maxBytes
+	return NewWithLimits(generation, limits)
 }
 
 func (history *History) SetGeneration(generation uint64) {
@@ -117,9 +137,9 @@ func (history *History) Capture(capture Capture) ([]protocol.Change, error) {
 	if len(capture.Payload) == 0 {
 		return nil, fmt.Errorf("%w: empty image payload", ErrInvalidCapture)
 	}
-	var maxBytes uint64 = protocol.MaxImageBytes
+	maxBytes := history.limits.MaxImageBytes
 	if capture.Kind == protocol.KindText {
-		maxBytes = protocol.MaxTextBytes
+		maxBytes = history.limits.MaxTextBytes
 	}
 	if uint64(len(capture.Payload)) > maxBytes {
 		return nil, ErrLimit
@@ -191,7 +211,7 @@ func (history *History) Capture(capture Capture) ([]protocol.Change, error) {
 	next := append([]record(nil), history.entries...)
 	nextTotal := history.totalBytes
 	changes := make([]protocol.Change, 0)
-	for len(next)+1 > history.maxEntries || nextTotal+metadata.Size > history.maxBytes {
+	for len(next)+1 > history.limits.MaxEntries || nextTotal+metadata.Size > history.limits.MaxTotalBytes {
 		if len(next) == 0 || next[len(next)-1].metadata.Pinned {
 			return nil, ErrLimit
 		}
@@ -283,9 +303,6 @@ func (history *History) Items() []Item {
 }
 
 func (history *History) Replace(items []Item) error {
-	if len(items) > history.maxEntries {
-		return ErrLimit
-	}
 	next := make([]record, 0, len(items))
 	seen := make(map[string]struct{}, len(items))
 	var total uint64
@@ -307,15 +324,41 @@ func (history *History) Replace(items []Item) error {
 		} else {
 			seenUnpinned = true
 		}
-		if metadata.Size > history.maxBytes-total {
-			return ErrLimit
-		}
 		total += metadata.Size
 		next = append(next, record{metadata: metadata, payload: valid.Payload()})
 	}
 	history.entries = next
 	history.totalBytes = total
+	history.trimToLimits()
 	return nil
+}
+
+func (history *History) trimToLimits() {
+	for {
+		removeAt := -1
+		for index := len(history.entries) - 1; index >= 0; index-- {
+			entry := history.entries[index]
+			maxBytes := history.limits.MaxImageBytes
+			if entry.metadata.Kind == protocol.KindText {
+				maxBytes = history.limits.MaxTextBytes
+			}
+			if !entry.metadata.Pinned && entry.metadata.Size > maxBytes {
+				removeAt = index
+				break
+			}
+		}
+		if removeAt < 0 && (len(history.entries) > history.limits.MaxEntries || history.totalBytes > history.limits.MaxTotalBytes) {
+			if len(history.entries) == 0 || history.entries[len(history.entries)-1].metadata.Pinned {
+				return
+			}
+			removeAt = len(history.entries) - 1
+		}
+		if removeAt < 0 {
+			return
+		}
+		history.totalBytes -= history.entries[removeAt].metadata.Size
+		history.entries = append(history.entries[:removeAt], history.entries[removeAt+1:]...)
+	}
 }
 
 func (history *History) Count() int {
