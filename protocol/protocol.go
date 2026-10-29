@@ -35,18 +35,19 @@ const (
 type MessageType string
 
 const (
-	TypeHello     MessageType = "hello"
-	TypeSnapshot  MessageType = "snapshot"
-	TypeDelta     MessageType = "delta"
-	TypeAck       MessageType = "ack"
-	TypeError     MessageType = "error"
-	TypeCopy      MessageType = "copy"
-	TypeRestore   MessageType = "restore"
-	TypePin       MessageType = "pin"
-	TypeDelete    MessageType = "delete"
-	TypeClear     MessageType = "clear"
-	TypeThumbnail MessageType = "thumbnail"
-	TypeResync    MessageType = "resync"
+	TypeHello      MessageType = "hello"
+	TypeSnapshot   MessageType = "snapshot"
+	TypeDelta      MessageType = "delta"
+	TypeAck        MessageType = "ack"
+	TypeError      MessageType = "error"
+	TypeCopy       MessageType = "copy"
+	TypeRestore    MessageType = "restore"
+	TypePin        MessageType = "pin"
+	TypeDelete     MessageType = "delete"
+	TypeDeleteMany MessageType = "delete_many"
+	TypeClear      MessageType = "clear"
+	TypeThumbnail  MessageType = "thumbnail"
+	TypeResync     MessageType = "resync"
 )
 
 type Kind string
@@ -173,6 +174,7 @@ type Message struct {
 	Thumbnail *Thumbnail `json:"thumbnail,omitempty"`
 
 	ID     string     `json:"id,omitempty"`
+	IDs    []string   `json:"ids,omitempty"`
 	Text   string     `json:"text,omitempty"`
 	Pinned *bool      `json:"pinned,omitempty"`
 	Scope  ClearScope `json:"scope,omitempty"`
@@ -235,6 +237,11 @@ func ValidateMessage(message Message) error {
 			return err
 		}
 		return noCommandFields(message, true, false, false, false)
+	case TypeDeleteMany:
+		if err := validateDeleteMany(message.IDs); err != nil {
+			return err
+		}
+		return noCommandFields(message, false, false, false, false)
 	case TypePin:
 		if err := validateRequiredID(message.ID); err != nil {
 			return err
@@ -483,6 +490,9 @@ func noCommandFields(message Message, allowID, allowPinned, allowScope, allowMax
 	if !allowID && message.ID != "" {
 		return fmt.Errorf("message contains unexpected id")
 	}
+	if message.Type != TypeDeleteMany && message.IDs != nil {
+		return fmt.Errorf("message contains unexpected ids")
+	}
 	if message.Type != TypeCopy && message.Text != "" {
 		return fmt.Errorf("message contains unexpected text")
 	}
@@ -518,11 +528,28 @@ func noCommandFields(message Message, allowID, allowPinned, allowScope, allowMax
 
 func validMessageType(messageType MessageType) bool {
 	switch messageType {
-	case TypeHello, TypeSnapshot, TypeDelta, TypeAck, TypeError, TypeCopy, TypeRestore, TypePin, TypeDelete, TypeClear, TypeThumbnail, TypeResync:
+	case TypeHello, TypeSnapshot, TypeDelta, TypeAck, TypeError, TypeCopy, TypeRestore, TypePin, TypeDelete, TypeDeleteMany, TypeClear, TypeThumbnail, TypeResync:
 		return true
 	default:
 		return false
 	}
+}
+
+func validateDeleteMany(ids []string) error {
+	if len(ids) == 0 || len(ids) > MaxEntries {
+		return fmt.Errorf("delete_many has %d ids", len(ids))
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if err := validateRequiredID(id); err != nil {
+			return err
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("delete_many has duplicate id %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
 }
 
 func validPersistence(state PersistenceState) bool {

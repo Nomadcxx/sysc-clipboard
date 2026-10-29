@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +51,35 @@ func TestValidateMessageAcceptsValidMessages(t *testing.T) {
 	} {
 		if err := ValidateMessage(msg); err != nil {
 			t.Errorf("ValidateMessage(%s) = %v", msg.Type, err)
+		}
+	}
+}
+
+func TestValidateDeleteManyMessage(t *testing.T) {
+	var message Message
+	if err := json.Unmarshal([]byte(`{"version":1,"type":"delete_many","ids":["first","second"]}`), &message); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateMessage(message); err != nil {
+		t.Fatalf("valid delete_many message rejected: %v", err)
+	}
+
+	tooMany := make([]string, MaxEntries+1)
+	for index := range tooMany {
+		tooMany[index] = fmt.Sprintf("entry-%d", index)
+	}
+	for _, invalid := range []Message{
+		{Version: Version, Type: TypeDeleteMany},
+		{Version: Version, Type: TypeDeleteMany, IDs: tooMany},
+		{Version: Version, Type: TypeDeleteMany, IDs: []string{"entry", "entry"}},
+		{Version: Version, Type: TypeDeleteMany, IDs: []string{""}},
+		{Version: Version, Type: TypeDeleteMany, IDs: []string{strings.Repeat("x", MaxIDBytes+1)}},
+		{Version: Version, Type: TypeDeleteMany, ID: "entry", IDs: []string{"other"}},
+		{Version: Version, Type: TypeDelete, ID: "entry", IDs: []string{"other"}},
+		{Version: Version, Type: TypeDelete, ID: "entry", IDs: []string{}},
+	} {
+		if err := ValidateMessage(invalid); err == nil {
+			t.Errorf("invalid delete message accepted: %+v", invalid)
 		}
 	}
 }
