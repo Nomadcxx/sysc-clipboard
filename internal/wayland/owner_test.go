@@ -481,7 +481,7 @@ func TestOwnerRestoreKeepsSourceUntilCancellation(t *testing.T) {
 		Generation:  1,
 		Kind:        protocol.KindText,
 		MIME:        "text/plain;charset=utf-8",
-		OfferedMIME: []string{"text/plain;charset=utf-8"},
+		OfferedMIME: []string{"text/plain;charset=utf-8", "text/html", "application/x-rich-text"},
 		Payload:     []byte("restore me"),
 		CapturedAt:  time.Unix(1, 0).UTC(),
 	}); err != nil {
@@ -501,12 +501,28 @@ func TestOwnerRestoreKeepsSourceUntilCancellation(t *testing.T) {
 	if source.isDestroyed() {
 		t.Fatal("restore source destroyed before cancellation")
 	}
-	if !equalStrings(source.mimes, []string{"text/plain;charset=utf-8", "text/plain", "UTF8_STRING"}) {
+	if !equalStrings(source.mimes, []string{"text/plain;charset=utf-8", "text/html", "application/x-rich-text"}) {
 		t.Fatalf("restore source MIME list = %v", source.mimes)
 	}
 
-	backend.push(func() { source.emitCancelled() })
+	readoptedSource := make(chan *fakeSource, 1)
+	backend.push(func() {
+		source.emitCancelled()
+		readoptedSource <- backend.manager.source(2)
+	})
 	waitFor(t, source.isDestroyed)
+	var readopted *fakeSource
+	select {
+	case readopted = <-readoptedSource:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not re-adopt the restored source")
+	}
+	if readopted == nil {
+		t.Fatal("restored source was not re-adopted")
+	}
+	if !equalStrings(readopted.mimes, []string{"text/plain;charset=utf-8", "text/html", "application/x-rich-text"}) {
+		t.Fatalf("re-adopted source MIME list = %v", readopted.mimes)
+	}
 }
 
 func TestOwnerRestoresOnlyAfterDeletedOfferIsAcknowledged(t *testing.T) {
