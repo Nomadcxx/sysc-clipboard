@@ -444,6 +444,7 @@ func (client *Client) Delete(id string) error {
 
 // DeleteMany queues an atomic delete batch when the connected daemon supports it.
 func (client *Client) DeleteMany(ids []string) error {
+	ids = append([]string(nil), ids...)
 	if err := protocol.ValidateMessage(protocol.Message{Version: protocol.Version, Type: protocol.TypeDeleteMany, IDs: ids}); err != nil {
 		return err
 	}
@@ -455,7 +456,7 @@ func (client *Client) DeleteMany(ids []string) error {
 		return ErrDeleteManyUnsupported
 	}
 	message := client.newCommand(protocol.TypeDeleteMany, "", nil, "", 0)
-	message.IDs = append([]string(nil), ids...)
+	message.IDs = ids
 	return client.enqueue(message)
 }
 

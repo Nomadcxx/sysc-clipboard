@@ -490,7 +490,7 @@ func noCommandFields(message Message, allowID, allowPinned, allowScope, allowMax
 	if !allowID && message.ID != "" {
 		return fmt.Errorf("message contains unexpected id")
 	}
-	if message.Type != TypeDeleteMany && len(message.IDs) > 0 {
+	if message.Type != TypeDeleteMany && message.IDs != nil {
 		return fmt.Errorf("message contains unexpected ids")
 	}
 	if message.Type != TypeCopy && message.Text != "" {

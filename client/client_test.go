@@ -422,9 +422,11 @@ func TestClientDeleteManyRequiresCapabilityAndSendsOneBatch(t *testing.T) {
 			<-done
 		}()
 		_ = nextUpdate(t, client.Updates())
-		if err := client.DeleteMany([]string{"first", "second"}); err != nil {
+		ids := []string{"first", "second"}
+		if err := client.DeleteMany(ids); err != nil {
 			t.Fatalf("DeleteMany: %v", err)
 		}
+		ids[0] = "changed"
 		select {
 		case message := <-commands:
 			if message.Type != protocol.TypeDeleteMany || len(message.IDs) != 2 || message.IDs[0] != "first" || message.IDs[1] != "second" {

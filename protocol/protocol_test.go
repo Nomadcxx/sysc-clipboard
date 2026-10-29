@@ -76,6 +76,7 @@ func TestValidateDeleteManyMessage(t *testing.T) {
 		{Version: Version, Type: TypeDeleteMany, IDs: []string{strings.Repeat("x", MaxIDBytes+1)}},
 		{Version: Version, Type: TypeDeleteMany, ID: "entry", IDs: []string{"other"}},
 		{Version: Version, Type: TypeDelete, ID: "entry", IDs: []string{"other"}},
+		{Version: Version, Type: TypeDelete, ID: "entry", IDs: []string{}},
 	} {
 		if err := ValidateMessage(invalid); err == nil {
 			t.Errorf("invalid delete message accepted: %+v", invalid)
