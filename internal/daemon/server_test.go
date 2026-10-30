@@ -123,7 +123,13 @@ func TestServerDisconnectsMalformedInput(t *testing.T) {
 
 func TestServerRejectsSecondServerAndRemovesSameUIDStaleSocket(t *testing.T) {
 	svc := newTestService(t, history.New(1))
-	socketPath := filepath.Join(t.TempDir(), "sysc-clipboard", "control.v1.sock")
+	// Keep the Unix socket path below sun_path's 108-byte limit.
+	socketDir, err := os.MkdirTemp("", "sysc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "sysc-clipboard", "control.v1.sock")
 	if err := ensureSocketDirectory(filepath.Dir(socketPath)); err != nil {
 		t.Fatal(err)
 	}

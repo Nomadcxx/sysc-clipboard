@@ -261,6 +261,44 @@ func TestDeleteManyIsAtomicAndReturnsHistoryOrder(t *testing.T) {
 	}
 }
 
+func TestExpireBeforeRemovesOnlyExpiredUnpinnedEntries(t *testing.T) {
+	h := New(1)
+	cutoff := time.Unix(100, 0).UTC()
+	entries := []struct {
+		value      string
+		capturedAt time.Time
+		pinned     bool
+	}{
+		{value: "pinned-old", capturedAt: cutoff.Add(-time.Hour), pinned: true},
+		{value: "unpinned-old", capturedAt: cutoff.Add(-time.Hour)},
+		{value: "boundary", capturedAt: cutoff},
+		{value: "new", capturedAt: cutoff.Add(time.Hour)},
+	}
+	for _, entry := range entries {
+		if _, err := h.Capture(capture(1, protocol.KindText, "text/plain", entry.value, entry.capturedAt)); err != nil {
+			t.Fatal(err)
+		}
+		if entry.pinned {
+			id := h.Snapshot()[0].ID
+			if _, err := h.SetPinned(id, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	changes := h.ExpireBefore(cutoff)
+	if len(changes) != 1 || changes[0].Kind != protocol.ChangeRemoved {
+		t.Fatalf("expiry changes = %+v, want one removal", changes)
+	}
+	if got, want := previews(h.Snapshot()), []string{"pinned-old", "new", "boundary"}; !equalStrings(got, want) {
+		t.Fatalf("remaining entries = %v, want %v", got, want)
+	}
+	wantBytes := uint64(len("pinned-old") + len("new") + len("boundary"))
+	if got := h.TotalBytes(); got != wantBytes {
+		t.Fatalf("remaining payload bytes = %d, want %d", got, wantBytes)
+	}
+}
+
 func TestTextPreviewIsUTF8SafeAndBounded(t *testing.T) {
 	h := New(1)
 	payload := strings.Repeat("界", protocol.MaxPreviewBytes)

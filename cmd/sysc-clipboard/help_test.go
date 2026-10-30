@@ -53,8 +53,8 @@ func TestHelpTranslatesGuidance(t *testing.T) {
 		if catalog == nil {
 			t.Fatalf("%s catalog missing", locale)
 		}
-		if len(catalog) != 12 {
-			t.Fatalf("%s catalog has %d keys, want 12", locale, len(catalog))
+		if len(catalog) != 15 {
+			t.Fatalf("%s catalog has %d keys, want 15", locale, len(catalog))
 		}
 		for english, translated := range catalog {
 			if translated == "" {

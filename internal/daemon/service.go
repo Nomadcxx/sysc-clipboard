@@ -34,6 +34,9 @@ var (
 const (
 	maxDecodedPixels = 16 << 20
 	serviceQueueSize = 4
+	// ponytail: hourly sweeps bound cleanup lag to one hour; retain the TTL cap
+	// if a sub-hour CLI setting is added.
+	historySweepMaxInterval = time.Hour
 	// One decode runs at a time. Callers queue in the reducer instead of
 	// failing, so this only bounds concurrent image work, not throughput.
 	thumbnailQueueSize = 1
@@ -52,6 +55,8 @@ type Options struct {
 	Store       *store.Store
 	Persistence protocol.PersistenceState
 	Wayland     protocol.WaylandState
+	// HistoryTTL removes unpinned entries older than this duration while running.
+	HistoryTTL time.Duration
 	// DisableCapture keeps clipboard operations live without adding history.
 	DisableCapture bool
 	// Restore runs outside the reducer and must return when its context is canceled.
@@ -430,6 +435,17 @@ func (service *Service) run(options Options) {
 		thumbnails:      newThumbnailCache(),
 		pendingRestores: make(map[uint64]pendingRestore),
 	}
+	var expiryTicker *time.Ticker
+	var expiryTicks <-chan time.Time
+	if options.HistoryTTL > 0 {
+		interval := options.HistoryTTL
+		if interval > historySweepMaxInterval {
+			interval = historySweepMaxInterval
+		}
+		expiryTicker = time.NewTicker(interval)
+		expiryTicks = expiryTicker.C
+		defer expiryTicker.Stop()
+	}
 
 	for {
 		select {
@@ -477,6 +493,8 @@ func (service *Service) run(options Options) {
 				}
 				request.reply <- serviceReply{}
 			}
+		case now := <-expiryTicks:
+			state.expireBefore(now.Add(-options.HistoryTTL))
 		case result := <-service.thumbnailResults:
 			state.completeThumbnail(service, result)
 		case result := <-service.restoreResults:
@@ -507,6 +525,10 @@ func (state *reducerState) capture(capture history.Capture) error {
 	}
 	state.commit(changes)
 	return nil
+}
+
+func (state *reducerState) expireBefore(cutoff time.Time) {
+	state.commit(state.history.ExpireBefore(cutoff))
 }
 
 func (state *reducerState) requestRestore(service *Service, request serviceRequest) {

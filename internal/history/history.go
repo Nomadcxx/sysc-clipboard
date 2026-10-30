@@ -321,6 +321,27 @@ func (history *History) Clear(scope protocol.ClearScope) ([]protocol.Change, err
 	return changes, nil
 }
 
+// ExpireBefore removes unpinned entries captured before cutoff.
+func (history *History) ExpireBefore(cutoff time.Time) []protocol.Change {
+	kept := make([]record, 0, len(history.entries))
+	changes := make([]protocol.Change, 0)
+	var total uint64
+	for _, entry := range history.entries {
+		if !entry.metadata.Pinned && entry.metadata.CapturedAt.Before(cutoff) {
+			changes = append(changes, changeFor(protocol.ChangeRemoved, entry))
+			continue
+		}
+		kept = append(kept, entry)
+		total += entry.metadata.Size
+	}
+	if len(changes) == 0 {
+		return nil
+	}
+	history.entries = kept
+	history.totalBytes = total
+	return changes
+}
+
 func (history *History) Snapshot() []protocol.Entry {
 	entries := make([]protocol.Entry, len(history.entries))
 	for index, entry := range history.entries {
