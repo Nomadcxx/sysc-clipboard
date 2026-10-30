@@ -136,7 +136,8 @@ ExecStart=%h/.local/bin/sysc-clipboard --auto-clear-days=30
 ```
 
 To clear the whole history on every daemon start, add `--clear-at-startup`. This also removes pinned
-entries and is disabled by default. The override is:
+entries and is disabled by default. The daemon exits with an error if encrypted persistence is
+unavailable or it cannot save the clear. `--check` reports persistence. The override is:
 
 ```ini
 [Service]
