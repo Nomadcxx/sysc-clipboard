@@ -6,6 +6,7 @@
  "disable clipboard history capture; copy and existing history remain available": "desativa a captura do histórico; copiar e o histórico existente continuam disponíveis",
  "maximum age in days before unpinned entries are removed; 0 disables auto-clear": "idade máxima em dias antes de remover entradas não fixadas; 0 desativa a limpeza automática",
  "clear all clipboard history when the daemon starts": "limpa todo o histórico da área de transferência ao iniciar o daemon",
+ "clear-at-startup requires available encrypted persistence": "a limpeza na inicialização exige armazenamento criptografado disponível",
  "auto-clear days must be non-negative and within the duration limit": "os dias de limpeza automática devem ser não negativos e estar dentro do limite de duração",
  "maximum retained history entries": "máximo de entradas mantidas no histórico",
  "maximum combined history payload bytes": "máximo de bytes de conteúdo no histórico",

@@ -248,6 +248,22 @@ func TestApplyStartupCleanupClearsAllHistoryAndPersists(t *testing.T) {
 	}
 }
 
+func TestApplyStartupClearRequiresPersistentStore(t *testing.T) {
+	h := history.New(1)
+	if _, err := h.Capture(history.Capture{
+		Generation: 1, Kind: protocol.KindText, MIME: "text/plain", Payload: []byte("keep until clear can persist"), CapturedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state := runtimeState{history: h}
+	if err := applyStartupCleanup(&state, 0, true, time.Now()); err == nil {
+		t.Fatal("startup clear succeeded without a persistent store")
+	}
+	if got := h.Count(); got != 1 {
+		t.Fatalf("history count after rejected startup clear = %d, want 1", got)
+	}
+}
+
 func TestRunCheckReportsRetentionWithoutClearingHistory(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	state, root, keyPath := retentionTestState(t, now)

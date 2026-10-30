@@ -228,11 +228,11 @@ func checkState(state runtimeState, parsed options, output io.Writer) error {
 
 func applyStartupCleanup(state *runtimeState, autoClearDays int, clearAtStartup bool, now time.Time) error {
 	if clearAtStartup {
+		if state.store == nil {
+			return errors.New(help("clear-at-startup requires available encrypted persistence"))
+		}
 		if _, err := state.history.Clear(protocol.ClearAll); err != nil {
 			return fmt.Errorf("clear clipboard history at startup: %w", err)
-		}
-		if state.store == nil {
-			return nil
 		}
 		if err := state.store.Save(state.history.Items()); err != nil {
 			return fmt.Errorf("persist clipboard history clear: %w", err)
