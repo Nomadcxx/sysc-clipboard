@@ -57,6 +57,67 @@ func TestServicePublishesStartupSnapshotAndCaptureDelta(t *testing.T) {
 	}
 }
 
+func TestServiceSweepsExpiredHistoryDuringRuntime(t *testing.T) {
+	now := time.Now().UTC()
+	h := history.New(1)
+	for _, value := range []struct {
+		text string
+		at   time.Time
+	}{
+		{text: "old", at: now.Add(-24 * time.Hour)},
+		{text: "pinned", at: now.Add(-24 * time.Hour)},
+		{text: "fresh", at: now.Add(time.Hour)},
+	} {
+		if _, err := h.Capture(textCapture(1, value.text, value.at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := h.Snapshot()
+	oldID := ""
+	var pinnedID string
+	for _, entry := range entries {
+		switch entry.Preview {
+		case "old":
+			oldID = entry.ID
+		case "pinned":
+			pinnedID = entry.ID
+		}
+	}
+	pinned := true
+	if _, err := h.SetPinned(pinnedID, pinned); err != nil {
+		t.Fatal(err)
+	}
+	if entry, ok := h.Metadata(pinnedID); !ok || !entry.Pinned {
+		t.Fatalf("entry %q is not pinned before service start: %+v", pinnedID, entry)
+	}
+
+	svc := NewService(Options{
+		History:     h,
+		HistoryTTL:  250 * time.Millisecond,
+		Persistence: protocol.PersistenceUnavailable,
+		Wayland:     protocol.WaylandUnavailable,
+	})
+	t.Cleanup(svc.Close)
+	sub, err := svc.Subscribe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sub.Close)
+	_ = nextMessage(t, sub.Updates)
+
+	delta := nextMessage(t, sub.Updates)
+	if delta.Type != protocol.TypeDelta || delta.Delta == nil || len(delta.Delta.Changes) != 1 || delta.Delta.Changes[0].ID != oldID || delta.Delta.Changes[0].Kind != protocol.ChangeRemoved {
+		t.Fatalf("expiry update = %+v, want removal of %q", delta.Delta, oldID)
+	}
+	snapshot, err := svc.CurrentSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Entries) != 2 {
+		t.Fatalf("entries after expiry = %+v, want pinned and fresh entries", snapshot.Entries)
+	}
+}
+
 func TestServiceDuplicateCapturePublishesMoveWithoutDuplicate(t *testing.T) {
 	svc := newTestService(t, history.New(1))
 	sub, err := svc.Subscribe(context.Background())

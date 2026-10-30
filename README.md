@@ -79,8 +79,9 @@ sysc-clipboard --check
 ```
 
 It prints the state directory, socket, entry count, persistence mode (`durable`, `volatile` or
-`unavailable`), capture mode and active history caps, then exits 0 or 1 without starting the daemon.
-It does not connect to a running daemon or check Wayland availability. Invalid arguments exit 2.
+`unavailable`), capture mode, active history caps and retention settings, then exits 0 or 1 without
+starting the daemon. It does not connect to a running daemon or check Wayland availability. Invalid
+arguments exit 2. The check never changes history, even when a startup clear is configured.
 
 | Flag | Meaning |
 |---|---|
@@ -88,6 +89,8 @@ It does not connect to a running daemon or check Wayland availability. Invalid a
 | `--key-file <path>` | Use a key file instead of the Secret Service |
 | `--state-dir <path>` | Override the state directory (must be absolute) |
 | `--disable-capture` | Stop adding clipboard entries while keeping copy and existing history available |
+| `--auto-clear-days <n>` | Remove unpinned entries older than this many days (default: 0, disabled) |
+| `--clear-at-startup` | Clear all history, including pinned entries, whenever the daemon starts |
 | `--max-entries <n>` | Maximum retained entries (default and ceiling: 100) |
 | `--max-total-bytes <n>` | Maximum combined payload bytes (default and ceiling: 268435456) |
 | `--max-text-bytes <n>` | Maximum bytes in a text entry (default and ceiling: 4194304) |
@@ -120,6 +123,29 @@ history capture. Existing encrypted history remains available while capture is d
 
 The state directory is `$XDG_STATE_HOME/sysc-clipboard`, falling back to
 `~/.local/state/sysc-clipboard`.
+
+To remove unpinned entries after 30 days, add `--auto-clear-days=30` to the user-service override.
+The daemon applies the age limit at startup and checks hourly while running; each day is 24 hours.
+Pinned entries are kept. Set the value to `0` to disable the age limit. For a source install, the
+override is:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=%h/.local/bin/sysc-clipboard --auto-clear-days=30
+```
+
+To clear the whole history on every daemon start, add `--clear-at-startup`. This also removes pinned
+entries and is disabled by default. The daemon exits with an error if encrypted persistence is
+unavailable or it cannot save the clear. `--check` reports persistence. The override is:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=%h/.local/bin/sysc-clipboard --clear-at-startup
+```
+
+`--check` reports both settings without applying either cleanup.
 
 To lower the caps, add the flags to the same service override. This keeps at most 50 entries and
 128 MiB of payload data:

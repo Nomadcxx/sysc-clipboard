@@ -20,11 +20,15 @@ import (
 	"github.com/Nomadcxx/sysc-clipboard/protocol"
 )
 
+const maxAutoClearDays = int64((1<<63 - 1) / int64(24*time.Hour))
+
 type options struct {
 	keyFile        string
 	stateDir       string
 	check          bool
 	disableCapture bool
+	autoClearDays  int
+	clearAtStartup bool
 	limits         history.Limits
 }
 
@@ -60,18 +64,22 @@ func run(parent context.Context, args []string, output, errorsOutput io.Writer) 
 		return 1
 	}
 	if parsed.check {
-		if err := checkState(state, parsed.disableCapture, output); err != nil {
+		if err := checkState(state, parsed, output); err != nil {
 			fmt.Fprintln(errorsOutput, err)
 			return 1
 		}
 		return 0
+	}
+	if err := applyStartupCleanup(&state, parsed.autoClearDays, parsed.clearAtStartup, time.Now()); err != nil {
+		fmt.Fprintln(errorsOutput, err)
+		return 1
 	}
 
 	logger := log.New(errorsOutput, "sysc-clipboard: ", log.LstdFlags)
 	for _, warning := range state.warnings {
 		logger.Printf("persistence unavailable: %v", warning)
 	}
-	if err := runDaemon(parent, state, logger, parsed.disableCapture); err != nil {
+	if err := runDaemon(parent, state, logger, parsed.disableCapture, autoClearTTL(parsed.autoClearDays)); err != nil {
 		logger.Print(err)
 		return 1
 	}
@@ -87,6 +95,8 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.StringVar(&parsed.stateDir, "state-dir", "", help("clipboard state directory"))
 	flags.BoolVar(&parsed.check, "check", false, help("check persistence and runtime configuration, then exit"))
 	flags.BoolVar(&parsed.disableCapture, "disable-capture", false, help("disable clipboard history capture; copy and existing history remain available"))
+	flags.IntVar(&parsed.autoClearDays, "auto-clear-days", 0, help("maximum age in days before unpinned entries are removed; 0 disables auto-clear"))
+	flags.BoolVar(&parsed.clearAtStartup, "clear-at-startup", false, help("clear all clipboard history when the daemon starts"))
 	flags.IntVar(&parsed.limits.MaxEntries, "max-entries", defaults.MaxEntries, help("maximum retained history entries"))
 	flags.Uint64Var(&parsed.limits.MaxTotalBytes, "max-total-bytes", defaults.MaxTotalBytes, help("maximum combined history payload bytes"))
 	flags.Uint64Var(&parsed.limits.MaxTextBytes, "max-text-bytes", defaults.MaxTextBytes, help("maximum bytes in a captured text entry"))
@@ -97,10 +107,24 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	if flags.NArg() != 0 {
 		return options{}, fmt.Errorf(help("unexpected argument %q"), flags.Arg(0))
 	}
+	if err := validateAutoClearDays(parsed.autoClearDays); err != nil {
+		return options{}, err
+	}
 	if err := validateLimits(parsed.limits); err != nil {
 		return options{}, err
 	}
 	return parsed, nil
+}
+
+func validateAutoClearDays(days int) error {
+	if days < 0 || int64(days) > maxAutoClearDays {
+		return errors.New(help("auto-clear days must be non-negative and within the duration limit"))
+	}
+	return nil
+}
+
+func autoClearTTL(days int) time.Duration {
+	return time.Duration(days) * 24 * time.Hour
 }
 
 func validateLimits(limits history.Limits) error {
@@ -172,7 +196,7 @@ func loadState(stateDir, keyFile string, limits history.Limits) (runtimeState, e
 	return state, nil
 }
 
-func checkState(state runtimeState, disableCapture bool, output io.Writer) error {
+func checkState(state runtimeState, parsed options, output io.Writer) error {
 	socketPath, err := daemon.DefaultSocketPath()
 	if err != nil {
 		return fmt.Errorf("resolve clipboard socket: %w", err)
@@ -186,17 +210,51 @@ func checkState(state runtimeState, disableCapture bool, output io.Writer) error
 	fmt.Fprintf(output, "max-text-bytes: %d\n", state.limits.MaxTextBytes)
 	fmt.Fprintf(output, "max-image-bytes: %d\n", state.limits.MaxImageBytes)
 	captureState := "enabled"
-	if disableCapture {
+	if parsed.disableCapture {
 		captureState = "disabled"
 	}
 	fmt.Fprintf(output, "capture: %s\n", captureState)
+	fmt.Fprintf(output, "auto-clear-days: %d\n", parsed.autoClearDays)
+	clearAtStartup := "disabled"
+	if parsed.clearAtStartup {
+		clearAtStartup = "enabled"
+	}
+	fmt.Fprintf(output, "clear-at-startup: %s\n", clearAtStartup)
 	for _, warning := range state.warnings {
 		fmt.Fprintf(output, "warning: %v\n", warning)
 	}
 	return nil
 }
 
-func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, disableCapture bool) error {
+func applyStartupCleanup(state *runtimeState, autoClearDays int, clearAtStartup bool, now time.Time) error {
+	if clearAtStartup {
+		if state.store == nil {
+			return errors.New(help("clear-at-startup requires available encrypted persistence"))
+		}
+		if _, err := state.history.Clear(protocol.ClearAll); err != nil {
+			return fmt.Errorf("clear clipboard history at startup: %w", err)
+		}
+		if err := state.store.Save(state.history.Items()); err != nil {
+			return fmt.Errorf("persist clipboard history clear: %w", err)
+		}
+		state.persistence = protocol.PersistenceDurable
+		return nil
+	}
+	if autoClearDays == 0 {
+		return nil
+	}
+	changes := state.history.ExpireBefore(now.Add(-autoClearTTL(autoClearDays)))
+	if len(changes) == 0 || state.store == nil {
+		return nil
+	}
+	if err := state.store.Save(state.history.Items()); err != nil {
+		return fmt.Errorf("persist expired clipboard history: %w", err)
+	}
+	state.persistence = protocol.PersistenceDurable
+	return nil
+}
+
+func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, disableCapture bool, historyTTL time.Duration) error {
 	var owner *wayland.Owner
 	service := daemon.NewService(daemon.Options{
 		History:        state.history,
@@ -204,6 +262,7 @@ func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, d
 		Persistence:    state.persistence,
 		Wayland:        protocol.WaylandUnavailable,
 		DisableCapture: disableCapture,
+		HistoryTTL:     historyTTL,
 		Restore: func(ctx context.Context, item history.Item) error {
 			if owner == nil {
 				return daemon.ErrRestoreUnavailable
