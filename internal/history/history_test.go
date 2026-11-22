@@ -404,3 +404,57 @@ func rangeFirstRune(value string) (rune, int) {
 	}
 	return 0, 0
 }
+
+func TestSanitizeTextStripsTerminalControls(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "plain text", payload: "hello, world", want: "hello, world"},
+		{name: "line and tab controls", payload: "a\tb\r\nc\n", want: "a\tb\r\nc\n"},
+		{name: "OSC 52 clipboard write", payload: "x\x1b]52;c;ZXZpbA==\x07y", want: "x]52;c;ZXZpbA==y"},
+		{name: "CSI and DEL", payload: "\x1b[2Jrm\x7f -rf", want: "[2Jrm -rf"},
+		{name: "UTF-8 C1 CSI", payload: "a\u009b31mb", want: "a31mb"},
+		{name: "raw C1 byte", payload: "a\x9b31mb", want: "a31mb"},
+		{name: "other text keeps its bytes", payload: "caf\xc3\xa9 \xff  ", want: "caf\xc3\xa9 \xff  "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(SanitizeText([]byte(tt.payload))); got != tt.want {
+				t.Fatalf("SanitizeText(%q) = %q, want %q", tt.payload, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCaptureStoresSanitizedText(t *testing.T) {
+	historyState := New(1)
+	if _, err := historyState.Capture(Capture{
+		Generation: 1,
+		Kind:       protocol.KindText,
+		MIME:       "text/plain",
+		Payload:    []byte("echo hi\x1b]0;owned\x07"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	item := historyState.Items()[0]
+	if got := string(item.Payload()); got != "echo hi]0;owned" {
+		t.Fatalf("stored payload = %q", got)
+	}
+	if got := item.Metadata().Preview; got != "echo hi]0;owned" {
+		t.Fatalf("preview = %q", got)
+	}
+	if got := item.Metadata().Size; got != uint64(len("echo hi]0;owned")) {
+		t.Fatalf("size = %d", got)
+	}
+
+	if _, err := historyState.Capture(Capture{
+		Generation: 1,
+		Kind:       protocol.KindText,
+		MIME:       "text/plain",
+		Payload:    []byte("\x1b\x07\x00"),
+	}); !errors.Is(err, ErrEmptyText) {
+		t.Fatalf("control-only capture error = %v, want ErrEmptyText", err)
+	}
+}

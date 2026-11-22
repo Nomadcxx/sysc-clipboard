@@ -1,7 +1,10 @@
 package wayland
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -100,6 +103,54 @@ func TestRestoreMIMEsAddsOnlySafeTextAliases(t *testing.T) {
 	got = restoreMIMEs(protocol.Entry{Kind: protocol.KindImage, MIME: "image/png"})
 	if !equalStrings(got, []string{"image/png"}) {
 		t.Fatalf("image restore MIME list = %v", got)
+	}
+
+	// The stored bytes are only the captured type. Types the source also
+	// offered, such as HTML or SVG, were never read or checked.
+	got = restoreMIMEs(protocol.Entry{
+		Kind:        protocol.KindText,
+		MIME:        "text/plain",
+		OfferedMIME: []string{"text/plain", "text/html", "image/svg+xml"},
+	})
+	if !equalStrings(got, []string{"text/plain", "text/plain;charset=utf-8", "UTF8_STRING"}) {
+		t.Fatalf("text restore with offered types = %v", got)
+	}
+	got = restoreMIMEs(protocol.Entry{Kind: protocol.KindImage, MIME: "image/png", OfferedMIME: []string{"image/png", "image/jpeg"}})
+	if !equalStrings(got, []string{"image/png"}) {
+		t.Fatalf("image restore with offered types = %v", got)
+	}
+}
+
+func TestOwnerRestoreStripsTerminalControlsFromEarlierEntries(t *testing.T) {
+	// Entries captured before history sanitized text still hold raw bytes.
+	raw := []byte("ls\x1b]52;c;ZXZpbA==\x07\n")
+	hash := sha256.Sum256(raw)
+	item, err := history.NewItem(protocol.Entry{
+		ID:          "earlier",
+		Kind:        protocol.KindText,
+		MIME:        "text/plain",
+		OfferedMIME: []string{"text/plain"},
+		Size:        uint64(len(raw)),
+		SHA256:      hex.EncodeToString(hash[:]),
+		CapturedAt:  time.Unix(1, 0).UTC(),
+	}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := newFakeBackend()
+	owner := runTestOwner(t, backend, OwnerOptions{})
+	if err := owner.Restore(context.Background(), item); err != nil {
+		t.Fatal(err)
+	}
+	offered := make(chan []byte, 1)
+	backend.push(func() { offered <- bytes.Clone(owner.sources[1].payload) })
+	select {
+	case payload := <-offered:
+		if string(payload) != "ls]52;c;ZXZpbA==\n" {
+			t.Fatalf("offered payload = %q", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not dispatch")
 	}
 }
 
@@ -501,7 +552,7 @@ func TestOwnerRestoreKeepsSourceUntilCancellation(t *testing.T) {
 	if source.isDestroyed() {
 		t.Fatal("restore source destroyed before cancellation")
 	}
-	if !equalStrings(source.mimes, []string{"text/plain;charset=utf-8", "text/html", "application/x-rich-text"}) {
+	if !equalStrings(source.mimes, []string{"text/plain;charset=utf-8", "text/plain", "UTF8_STRING"}) {
 		t.Fatalf("restore source MIME list = %v", source.mimes)
 	}
 

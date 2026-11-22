@@ -203,10 +203,9 @@ type readResult struct {
 }
 
 type selectionBackup struct {
-	kind        protocol.Kind
-	mime        string
-	offeredMIME []string
-	payload     []byte
+	kind    protocol.Kind
+	mime    string
+	payload []byte
 }
 
 type sourceState struct {
@@ -604,12 +603,10 @@ func (owner *Owner) acceptPayload(result readResult) {
 	if len(result.payload) == 0 {
 		return
 	}
-	backupPayload := bytes.Clone(result.payload)
 	owner.backup = &selectionBackup{
-		kind:        result.kind,
-		mime:        result.mime,
-		offeredMIME: append([]string(nil), result.offered...),
-		payload:     backupPayload,
+		kind:    result.kind,
+		mime:    result.mime,
+		payload: bytes.Clone(result.payload),
 	}
 	if owner.options.Capture != nil {
 		capture := history.Capture{
@@ -638,6 +635,11 @@ func (owner *Owner) offerPayload(metadata protocol.Entry, payload []byte) error 
 		return ErrSourceLimit
 	}
 	mimes := restoreMIMEs(metadata)
+	if metadata.Kind == protocol.KindText {
+		// History sanitizes text at capture; entries stored before it did
+		// still hold raw bytes.
+		payload = history.SanitizeText(payload)
+	}
 	if len(mimes) == 0 || len(payload) == 0 {
 		return ErrOwnerUnavailable
 	}
@@ -715,7 +717,7 @@ func (owner *Owner) adoptBackup(backup *selectionBackup) {
 	if owner.manager == nil || owner.device == nil {
 		return
 	}
-	_ = owner.offerPayload(protocol.Entry{Kind: backup.kind, MIME: backup.mime, OfferedMIME: backup.offeredMIME}, backup.payload)
+	_ = owner.offerPayload(protocol.Entry{Kind: backup.kind, MIME: backup.mime}, backup.payload)
 }
 
 func (owner *Owner) cancelRead() {
@@ -926,10 +928,10 @@ func selectCaptureMIME(offered []string) (kind protocol.Kind, mime string, ok bo
 	return "", "", false
 }
 
+// restoreMIMEs advertises only the captured type and, for text, its plain
+// text aliases. The source may also have offered HTML, SVG or other types,
+// but the stored bytes are the captured type and nothing else was read.
 func restoreMIMEs(entry protocol.Entry) []string {
-	if len(entry.OfferedMIME) > 0 {
-		return append([]string(nil), entry.OfferedMIME...)
-	}
 	if entry.MIME == "" {
 		return nil
 	}
