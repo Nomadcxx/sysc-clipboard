@@ -505,23 +505,82 @@ func TestOwnerRestoreKeepsSourceUntilCancellation(t *testing.T) {
 		t.Fatalf("restore source MIME list = %v", source.mimes)
 	}
 
-	readoptedSource := make(chan *fakeSource, 1)
-	backend.push(func() {
-		source.emitCancelled()
-		readoptedSource <- backend.manager.source(2)
-	})
+	// Cancellation means another client replaced the daemon's selection.
+	// Taking it back would undo that client's copy or clear.
+	backend.push(func() { source.emitCancelled() })
 	waitFor(t, source.isDestroyed)
-	var readopted *fakeSource
-	select {
-	case readopted = <-readoptedSource:
-	case <-time.After(2 * time.Second):
-		t.Fatal("owner did not re-adopt the restored source")
+	if got := sourcesAfterEvents(t, backend); got != 0 {
+		t.Fatalf("live sources after cancellation = %d, want none", got)
 	}
-	if readopted == nil {
-		t.Fatal("restored source was not re-adopted")
+}
+
+func TestOwnerHonoursClearOfItsOwnSelection(t *testing.T) {
+	tests := []struct {
+		name  string
+		clear func(backend *fakeBackend, source *fakeSource)
+	}{
+		{name: "cancel before nil selection", clear: func(backend *fakeBackend, source *fakeSource) {
+			source.emitCancelled()
+			backend.device.emitSelection(nil)
+		}},
+		{name: "nil selection before cancel", clear: func(backend *fakeBackend, source *fakeSource) {
+			backend.device.emitSelection(nil)
+			source.emitCancelled()
+		}},
 	}
-	if !equalStrings(readopted.mimes, []string{"text/plain;charset=utf-8", "text/html", "application/x-rich-text"}) {
-		t.Fatalf("re-adopted source MIME list = %v", readopted.mimes)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			historyState := history.New(1)
+			if _, err := historyState.Capture(history.Capture{
+				Generation: 1,
+				Kind:       protocol.KindText,
+				MIME:       "text/plain",
+				Payload:    []byte("secret-token-value"),
+				CapturedAt: time.Unix(1, 0).UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			backend := newFakeBackend()
+			owner := runTestOwner(t, backend, OwnerOptions{})
+			if err := owner.Restore(context.Background(), historyState.Items()[0]); err != nil {
+				t.Fatal(err)
+			}
+			source := backend.manager.source(1)
+			backend.push(func() { tt.clear(backend, source) })
+			if got := sourcesAfterEvents(t, backend); got != 0 {
+				t.Fatalf("live sources after clear = %d, want none", got)
+			}
+			if got := backend.manager.createdCount(); got != 1 {
+				t.Fatalf("sources created = %d, want only the restore", got)
+			}
+		})
+	}
+}
+
+func TestOwnerDoesNotReAdoptAnEarlierSelection(t *testing.T) {
+	backend := newFakeBackend()
+	runTestOwner(t, backend, OwnerOptions{})
+
+	first := &fakeOffer{idValue: 10, payload: []byte("earlier clipboard")}
+	backend.push(func() {
+		backend.device.emitDataOffer(first)
+		first.emitMIME("text/plain")
+		backend.device.emitSelection(first)
+	})
+	waitFor(t, first.isDestroyed)
+
+	// A password manager's selection is never captured. When it is cleared,
+	// the earlier entry must not take its place on the clipboard.
+	secret := &fakeOffer{idValue: 11, payload: []byte("password")}
+	backend.push(func() {
+		backend.device.emitDataOffer(secret)
+		secret.emitMIME("text/plain")
+		secret.emitMIME(passwordManagerHintMIME)
+		backend.device.emitSelection(secret)
+		backend.device.emitSelection(nil)
+	})
+	if got := sourcesAfterEvents(t, backend); got != 0 {
+		t.Fatalf("live sources after clearing an uncaptured selection = %d, want none", got)
 	}
 }
 
@@ -781,6 +840,12 @@ func (manager *fakeManager) source(id uint32) *fakeSource {
 	return manager.sources[id]
 }
 
+func (manager *fakeManager) createdCount() int {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return int(manager.nextID - 1)
+}
+
 func (manager *fakeManager) sourceCount() int {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -970,6 +1035,31 @@ func (source *fakeSource) emitCancelled() {
 func (source *fakeSource) emitSend(mime string, fd int) {
 	if source.sendHandler != nil {
 		source.sendHandler(sourceSendEvent{mime: mime, fd: fd})
+	}
+}
+
+// sourcesAfterEvents waits until the owner has dispatched every event pushed
+// before it, then counts the sources it has not destroyed.
+func sourcesAfterEvents(t *testing.T, backend *fakeBackend) int {
+	t.Helper()
+	live := make(chan int, 1)
+	backend.push(func() {
+		count := 0
+		backend.manager.mu.Lock()
+		for _, source := range backend.manager.sources {
+			if !source.isDestroyed() {
+				count++
+			}
+		}
+		backend.manager.mu.Unlock()
+		live <- count
+	})
+	select {
+	case count := <-live:
+		return count
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not dispatch pending events")
+		return 0
 	}
 }
 

@@ -21,14 +21,13 @@ const (
 	protocolWLRManagerInterface = "zwlr_data_control_manager_v1"
 	seatInterface               = "wl_seat"
 
-	maxSelectionBackupBytes = 200 << 20
-	maxOfferStates          = 64
-	maxCaptureQueue         = 4
-	maxWriteQueue           = 4
-	maxOutgoingSources      = 4
-	ownerCommandQueue       = 4
-	ownerPollInterval       = 25 * time.Millisecond
-	seatBindingVersion      = 10
+	maxOfferStates     = 64
+	maxCaptureQueue    = 4
+	maxWriteQueue      = 4
+	maxOutgoingSources = 4
+	ownerCommandQueue  = 4
+	ownerPollInterval  = 25 * time.Millisecond
+	seatBindingVersion = 10
 )
 
 var (
@@ -142,14 +141,22 @@ type Owner struct {
 	readBusy    bool
 	currentRead *readState
 	pendingRead *pendingReadRequest
-	backup      *selectionBackup
+	// backup holds the payload of the current external selection so it can
+	// be offered again after that owner exits. It is nil whenever the current
+	// selection was not captured.
+	backup *selectionBackup
 	// A server-created offer stays registered in the Wayland context until
 	// wl_display.delete_id arrives. Do not create a replacement selection
 	// before that acknowledgement, because a compositor may reuse its ID.
 	offerDeletionPending bool
 
-	sources        map[uint32]*sourceState
-	awaitingSource uint32
+	sources map[uint32]*sourceState
+	// ownSource is the daemon source last set as the selection, until the
+	// compositor cancels it. ownSourceCancelled records that cancellation
+	// until the next selection event. Either one means a nil selection is
+	// a clear rather than an owner exit, because the daemon is still alive.
+	ownSource          uint32
+	ownSourceCancelled bool
 }
 
 type ownerCommand struct {
@@ -479,6 +486,10 @@ func (owner *Owner) handlePrimarySelection(offer dataControlOffer) {
 }
 
 func (owner *Owner) handleSelection(offer dataControlOffer) {
+	cleared := offer == nil && (owner.ownSource != 0 || owner.ownSourceCancelled)
+	owner.ownSourceCancelled = false
+	backup := owner.backup
+	owner.backup = nil
 	owner.generation++
 	owner.generationErr = nil
 	if owner.options.SetGeneration != nil && !owner.enqueueCapture(captureJob{
@@ -495,13 +506,12 @@ func (owner *Owner) handleSelection(offer dataControlOffer) {
 	owner.currentOffer = offer
 	if offer == nil {
 		owner.currentOfferID = 0
-		if owner.awaitingSource == 0 {
-			owner.adoptBackup()
+		if !cleared && backup != nil {
+			owner.adoptBackup(backup)
 		}
 		return
 	}
 	owner.currentOfferID = offer.id()
-	owner.awaitingSource = 0
 	state := owner.offers[owner.currentOfferID]
 	if state == nil || state.invalid || owner.generationErr != nil {
 		return
@@ -661,15 +671,7 @@ func (owner *Owner) offerPayload(metadata protocol.Entry, payload []byte) error 
 		owner.removeSource(source.id())
 		return err
 	}
-	owner.awaitingSource = source.id()
-	if len(payload) <= maxSelectionBackupBytes {
-		owner.backup = &selectionBackup{
-			kind:        metadata.Kind,
-			mime:        metadata.MIME,
-			offeredMIME: append([]string(nil), mimes...),
-			payload:     payload,
-		}
-	}
+	owner.ownSource = source.id()
 	return nil
 }
 
@@ -691,11 +693,11 @@ func (owner *Owner) handleSourceCancelled(id uint32) {
 		return
 	}
 	owner.removeSource(id)
-	if owner.awaitingSource == id {
-		owner.awaitingSource = 0
-		if owner.currentOffer == nil {
-			owner.adoptBackup()
-		}
+	// Cancellation means another client replaced this selection, with its
+	// own copy or with a clear. Taking the selection back would undo that.
+	if owner.ownSource == id {
+		owner.ownSource = 0
+		owner.ownSourceCancelled = true
 	}
 }
 
@@ -709,11 +711,10 @@ func (owner *Owner) removeSource(id uint32) {
 	_ = state.source.destroy()
 }
 
-func (owner *Owner) adoptBackup() {
-	if owner.backup == nil || owner.manager == nil || owner.device == nil || owner.awaitingSource != 0 {
+func (owner *Owner) adoptBackup(backup *selectionBackup) {
+	if owner.manager == nil || owner.device == nil {
 		return
 	}
-	backup := owner.backup
 	_ = owner.offerPayload(protocol.Entry{Kind: backup.kind, MIME: backup.mime, OfferedMIME: backup.offeredMIME}, backup.payload)
 }
 
@@ -731,7 +732,8 @@ func (owner *Owner) cancelSources() {
 	for id := range owner.sources {
 		owner.removeSource(id)
 	}
-	owner.awaitingSource = 0
+	owner.ownSource = 0
+	owner.ownSourceCancelled = false
 }
 
 func (owner *Owner) destroyOffer(id uint32) {
