@@ -217,8 +217,9 @@ as able to read and change the history.
   offers the last copy again, so a paste still works after the source is closed. Wayland reports a
   clear in the same way as an exit, so the daemon also re-offers after a clear of a selection it
   does not own. A second clear removes it, because the daemon then owns the selection and honours
-  the clear. A clear of an uncaptured selection, such as one marked by a password manager, is
-  never undone.
+  the clear. A clear of a selection the daemon skips, such as one marked by a password manager, is
+  never undone. `--disable-capture` pauses history only: the daemon still keeps the current
+  selection in memory and re-offers it once after a clear.
 
 ## Ecosystem
 
