@@ -89,7 +89,7 @@ arguments exit 2. The check never changes history, even when a startup clear is 
 | `--key-file <path>` | Use a key file instead of the Secret Service |
 | `--state-dir <path>` | Override the state directory (must be absolute) |
 | `--disable-capture` | Stop adding clipboard entries while keeping copy and existing history available |
-| `--auto-clear-days <n>` | Remove unpinned entries older than this many days (default: 0, disabled) |
+| `--auto-clear-days <n>` | Remove unpinned entries older than this many days (default: 30; 0 disables it) |
 | `--clear-at-startup` | Clear all history, including pinned entries, whenever the daemon starts |
 | `--max-entries <n>` | Maximum retained entries (default and ceiling: 100) |
 | `--max-total-bytes <n>` | Maximum combined payload bytes (default and ceiling: 268435456) |
@@ -124,16 +124,20 @@ history capture. Existing encrypted history remains available while capture is d
 The state directory is `$XDG_STATE_HOME/sysc-clipboard`, falling back to
 `~/.local/state/sysc-clipboard`.
 
-To remove unpinned entries after 30 days, add `--auto-clear-days=30` to the user-service override.
-The daemon applies the age limit at startup and checks hourly while running; each day is 24 hours.
-Pinned entries are kept. Set the value to `0` to disable the age limit. For a source install, the
-override is:
+Unpinned entries are removed after 30 days by default. The daemon applies the age limit at startup
+and checks hourly while running; each day is 24 hours. Pinned entries are kept. To keep entries for
+7 days instead, add `--auto-clear-days=7` to the user-service override. Set the value to `0` to
+keep unpinned entries until the count or size caps evict them. For a source install, the override
+is:
 
 ```ini
 [Service]
 ExecStart=
-ExecStart=%h/.local/bin/sysc-clipboard --auto-clear-days=30
+ExecStart=%h/.local/bin/sysc-clipboard --auto-clear-days=7
 ```
+
+Versions before this default kept entries indefinitely. The first start after an upgrade removes
+unpinned entries older than 30 days unless the override sets another value.
 
 To clear the whole history on every daemon start, add `--clear-at-startup`. This also removes pinned
 entries and is disabled by default. The daemon exits with an error if encrypted persistence is
