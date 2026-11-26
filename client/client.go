@@ -361,19 +361,50 @@ func (client *Client) emit(message protocol.Message, connected bool) {
 		return
 	default:
 	}
+	// The consumer is behind. Drop stale state, but keep every queued command
+	// reply: an ACK, error, or thumbnail is the only delivery of that result.
+	kept := make([]Update, 0, inboundQueueSize)
 	for {
 		select {
-		case <-client.updates:
+		case queued := <-client.updates:
+			if !coalescibleUpdate(queued) {
+				kept = append(kept, queued)
+			}
 			continue
 		default:
-			break
 		}
 		break
 	}
-	select {
-	case client.updates <- update:
-	default:
+	if !coalescibleUpdate(update) {
+		kept = append(kept, update)
 	}
+	// Newest replies win when even the replies overflow the channel; state is
+	// already represented by the next snapshot.
+	if len(kept) > inboundQueueSize {
+		kept = kept[len(kept)-inboundQueueSize:]
+	}
+	for _, queued := range kept {
+		select {
+		case client.updates <- queued:
+		default:
+		}
+	}
+	if coalescibleUpdate(update) {
+		select {
+		case client.updates <- update:
+		default:
+		}
+	}
+}
+
+// coalescibleUpdate reports whether a queued update is state that a later
+// snapshot or delta makes obsolete. Replies and errors are not.
+func coalescibleUpdate(update Update) bool {
+	switch update.Message.Type {
+	case protocol.TypeSnapshot, protocol.TypeDelta:
+		return true
+	}
+	return false
 }
 
 func (client *Client) enqueue(message protocol.Message) error {

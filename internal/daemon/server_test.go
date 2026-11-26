@@ -246,3 +246,65 @@ func nextQueueMessage(t *testing.T, queue *outboundQueue) protocol.Message {
 	}
 	return message
 }
+
+// #28: coalescing state on overflow must not discard a command reply that
+// already shares the queue.
+func TestOutboundQueueOverflowKeepsCommandReplies(t *testing.T) {
+	queue := newOutboundQueue(2)
+	defer queue.Close()
+	ack := protocol.Message{Version: protocol.Version, Type: protocol.TypeAck, Ack: &protocol.Ack{Revision: 1}}
+	if err := queue.Enqueue(ack, nil); err != nil {
+		t.Fatal(err)
+	}
+	delta := protocol.Message{Version: protocol.Version, Type: protocol.TypeDelta, Delta: &protocol.Delta{Revision: 1}}
+	if err := queue.Enqueue(delta, func() (protocol.Message, error) {
+		return protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &protocol.Snapshot{Revision: 2, Persistence: protocol.PersistenceUnavailable, Wayland: protocol.WaylandUnavailable}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Enqueue(delta, func() (protocol.Message, error) {
+		return protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &protocol.Snapshot{Revision: 3, Persistence: protocol.PersistenceUnavailable, Wayland: protocol.WaylandUnavailable}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first := nextQueueMessage(t, queue)
+	if first.Type != protocol.TypeAck || first.Ack == nil || first.Ack.Revision != 1 {
+		t.Fatalf("queue dropped the reply: %+v", first)
+	}
+	second := nextQueueMessage(t, queue)
+	if second.Type != protocol.TypeSnapshot || second.Snapshot == nil || second.Snapshot.Revision != 3 {
+		t.Fatalf("queue did not replace state with the latest snapshot: %+v", second)
+	}
+}
+
+// A reply that arrives when the queue is full is still delivered, and the
+// queue remains bounded for replies.
+func TestOutboundQueueAcceptsReplyAtCapacity(t *testing.T) {
+	queue := newOutboundQueue(1)
+	defer queue.Close()
+	for i := 0; i < 1; i++ {
+		if err := queue.Enqueue(protocol.Message{Version: protocol.Version, Type: protocol.TypeDelta}, func() (protocol.Message, error) {
+			return protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &protocol.Snapshot{}}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := queue.Enqueue(protocol.Message{Version: protocol.Version, Type: protocol.TypeError, Error: &protocol.ErrorBody{Code: protocol.ErrorUnavailable, Message: "x"}}, nil); err != nil {
+		t.Fatalf("reply at capacity: %v", err)
+	}
+	if _, ok := queue.TryNext(); !ok {
+		t.Fatal("queue empty")
+	}
+	if message, ok := queue.TryNext(); !ok || message.Type != protocol.TypeError {
+		t.Fatalf("reply missing after capacity: %+v, %v", message, ok)
+	}
+
+	replies := newOutboundQueue(1)
+	defer replies.Close()
+	if err := replies.Enqueue(protocol.Message{Version: protocol.Version, Type: protocol.TypeError, Error: &protocol.ErrorBody{Code: protocol.ErrorUnavailable, Message: "x"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := replies.Enqueue(protocol.Message{Version: protocol.Version, Type: protocol.TypeError, Error: &protocol.ErrorBody{Code: protocol.ErrorUnavailable, Message: "y"}}, nil); !errors.Is(err, ErrOutboundQueueFull) {
+		t.Fatalf("unbounded reply queue error = %v, want %v", err, ErrOutboundQueueFull)
+	}
+}
