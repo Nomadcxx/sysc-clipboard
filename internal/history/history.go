@@ -121,6 +121,24 @@ func (history *History) SetGeneration(generation uint64) {
 	history.generation = generation
 }
 
+// validateMetadataSnapshot refuses state that cannot be delivered in a single
+// protocol frame. JSON escaping can expand offered MIME strings substantially,
+// so the per-entry limits alone do not bound the encoded snapshot.
+func validateMetadataSnapshot(records []record) error {
+	entries := make([]protocol.Entry, len(records))
+	for index := range records {
+		entries[index] = records[index].metadata
+	}
+	if err := protocol.ValidateSnapshot(protocol.Snapshot{
+		Entries:     entries,
+		Persistence: protocol.PersistenceDurable,
+		Wayland:     protocol.WaylandReady,
+	}); err != nil {
+		return fmt.Errorf("%w: clipboard metadata: %v", ErrLimit, err)
+	}
+	return nil
+}
+
 func (history *History) Generation() uint64 {
 	return history.generation
 }
@@ -199,6 +217,9 @@ func (history *History) Capture(capture Capture) ([]protocol.Change, error) {
 			insertAt = 0
 		}
 		next = insertRecord(next, insertAt, updated)
+		if err := validateMetadataSnapshot(next); err != nil {
+			return nil, err
+		}
 		history.entries = next
 		return []protocol.Change{changeFor(protocol.ChangeMoved, updated)}, nil
 	}
@@ -215,8 +236,15 @@ func (history *History) Capture(capture Capture) ([]protocol.Change, error) {
 	next := append([]record(nil), history.entries...)
 	nextTotal := history.totalBytes
 	changes := make([]protocol.Change, 0)
-	for len(next)+1 > history.limits.MaxEntries || nextTotal+metadata.Size > history.limits.MaxTotalBytes {
-		if len(next) == 0 || next[len(next)-1].metadata.Pinned {
+	insertAt := pinnedCount(next)
+	next = insertRecord(next, insertAt, candidate)
+	nextTotal += metadata.Size
+	for {
+		metadataErr := validateMetadataSnapshot(next)
+		if metadataErr == nil && len(next) <= history.limits.MaxEntries && nextTotal <= history.limits.MaxTotalBytes {
+			break
+		}
+		if len(next) == 0 || next[len(next)-1].metadata.Pinned || next[len(next)-1].metadata.ID == metadata.ID {
 			return nil, ErrLimit
 		}
 		removed := next[len(next)-1]
@@ -224,9 +252,6 @@ func (history *History) Capture(capture Capture) ([]protocol.Change, error) {
 		nextTotal -= removed.metadata.Size
 		changes = append(changes, changeFor(protocol.ChangeRemoved, removed))
 	}
-	insertAt := pinnedCount(next)
-	next = insertRecord(next, insertAt, candidate)
-	nextTotal += metadata.Size
 	history.entries = next
 	history.totalBytes = nextTotal
 	changes = append(changes, changeFor(protocol.ChangeAdded, candidate))
@@ -250,6 +275,9 @@ func (history *History) SetPinned(id string, pinned bool) ([]protocol.Change, er
 		insertAt = 0
 	}
 	next = insertRecord(next, insertAt, entry)
+	if err := validateMetadataSnapshot(next); err != nil {
+		return nil, err
+	}
 	history.entries = next
 	return []protocol.Change{changeFor(protocol.ChangeUpdated, entry)}, nil
 }

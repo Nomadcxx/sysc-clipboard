@@ -195,6 +195,25 @@ func TestValidateMessageRejectsSnapshotBoundsAndInvalidTextPreview(t *testing.T)
 	}
 }
 
+func TestValidateSnapshotRejectsMetadataLargerThanAFrame(t *testing.T) {
+	mime := strings.Repeat(`"`, MaxMIMEBytes-1) + "a"
+	entries := make([]Entry, MaxEntries)
+	for index := range entries {
+		entry := validEntry()
+		entry.ID = fmt.Sprintf("entry-%d", index)
+		entry.MIME = mime
+		entry.OfferedMIME = make([]string, MaxOfferedMIME)
+		for offered := range entry.OfferedMIME {
+			entry.OfferedMIME[offered] = mime[:MaxMIMEBytes-1] + "abcdefghijklmnopqrstuvwxyz012345"[offered:offered+1]
+		}
+		entries[index] = entry
+	}
+	err := ValidateSnapshot(Snapshot{Revision: 1, Entries: entries, Persistence: PersistenceDurable, Wayland: WaylandReady})
+	if err == nil || !strings.Contains(err.Error(), "snapshot metadata exceeds") {
+		t.Fatalf("oversized snapshot metadata error = %v", err)
+	}
+}
+
 func TestWriteAndReadMessageRoundTrip(t *testing.T) {
 	want := Message{Version: Version, Type: TypeSnapshot, Snapshot: &Snapshot{
 		Revision:    7,
