@@ -89,7 +89,7 @@ arguments exit 2. The check never changes history, even when a startup clear is 
 | `--key-file <path>` | Use a key file instead of the Secret Service |
 | `--state-dir <path>` | Override the state directory (must be absolute) |
 | `--disable-capture` | Stop adding clipboard entries while keeping copy and existing history available |
-| `--auto-clear-days <n>` | Remove unpinned entries older than this many days (default: 0, disabled) |
+| `--auto-clear-days <n>` | Remove unpinned entries older than this many days (default: 30; 0 disables it) |
 | `--clear-at-startup` | Clear all history, including pinned entries, whenever the daemon starts |
 | `--max-entries <n>` | Maximum retained entries (default and ceiling: 100) |
 | `--max-total-bytes <n>` | Maximum combined payload bytes (default and ceiling: 268435456) |
@@ -124,16 +124,20 @@ history capture. Existing encrypted history remains available while capture is d
 The state directory is `$XDG_STATE_HOME/sysc-clipboard`, falling back to
 `~/.local/state/sysc-clipboard`.
 
-To remove unpinned entries after 30 days, add `--auto-clear-days=30` to the user-service override.
-The daemon applies the age limit at startup and checks hourly while running; each day is 24 hours.
-Pinned entries are kept. Set the value to `0` to disable the age limit. For a source install, the
-override is:
+Unpinned entries are removed after 30 days by default. The daemon applies the age limit at startup
+and checks hourly while running; each day is 24 hours. Pinned entries are kept. To keep entries for
+7 days instead, add `--auto-clear-days=7` to the user-service override. Set the value to `0` to
+keep unpinned entries until the count or size caps evict them. For a source install, the override
+is:
 
 ```ini
 [Service]
 ExecStart=
-ExecStart=%h/.local/bin/sysc-clipboard --auto-clear-days=30
+ExecStart=%h/.local/bin/sysc-clipboard --auto-clear-days=7
 ```
+
+Versions before this default kept entries indefinitely. The first start after an upgrade removes
+unpinned entries older than 30 days unless the override sets another value.
 
 To clear the whole history on every daemon start, add `--clear-at-startup`. This also removes pinned
 entries and is disabled by default. The daemon exits with an error if encrypted persistence is
@@ -172,17 +176,50 @@ daemon lacks it. Single-entry deletion remains available.
 ## History and storage
 
 - **100 entries, 256 MiB total**: text up to 4 MiB and images up to 32 MiB per entry
-- **Restores with the original MIME type**
+- **Restores with the captured MIME type**, plus plain-text aliases for text
+- **Strips terminal control characters** from text at capture and restore; tab, line feed and
+  carriage return are kept
 - **Pins**: pinned entries survive `ClearUnpinned` and sort first; `ClearAll` removes them
 - **Encrypted at rest**: AES-256-GCM per entry plus an encrypted manifest, with the key in the
   Secret Service or a key file
 - **Survives restarts**: history is loaded from disk on start
-- **Private socket**: metadata, 200-byte text previews and PNG thumbnails only
+- **Private socket**: the wire format carries metadata, 200-byte text previews and PNG thumbnails;
+  see [Security model](#security-model) for what a client can do with it
 - **`ext-data-control-v1`** with a `zwlr-data-control` fallback
-- **Refuses password-manager selections** (`x-kde-passwordManagerHint`); the primary selection is
-  not captured
+- **Skips selections marked by password managers** (`x-kde-passwordManagerHint`), when the source
+  sets the marker; the primary selection is not captured
+- **Honours a clear while it owns the selection**; see [Security model](#security-model)
 - **Duplicate payloads** merge their MIME types and keep their pin
 - **A corrupt manifest is quarantined** and history degrades to volatile instead of failing
+
+## Security model
+
+sysc-clipboard protects history from other users and from offline access to the disk. It does not
+protect history from other processes running as the same user. Treat every program in your session
+as able to read and change the history.
+
+- **The socket is not an access check.** The daemon accepts any client with your uid. Through
+  `restore` and `copy`, a client can put any stored entry, or text of its choice, on the system
+  clipboard, where any application can read it. Through `clear` and `delete`, it can destroy history.
+  The protocol carries metadata only, but a restore publishes the whole payload to the clipboard.
+- **The key can be read by any same-user process.** In the default setup, the history key is a
+  Secret Service item in the default collection. Any process on your session bus can look it up
+  while the keyring is unlocked and decrypt the state directory. A `--key-file` is readable by the
+  same processes.
+- **The client checks the daemon's uid, not its identity.** Clients refuse a socket served by
+  another user. A process of the same user can replace the socket and show a client false entries
+  and false acknowledgements.
+- **The password-manager marker is optional.** The daemon skips a selection only when its source
+  adds `x-kde-passwordManagerHint`. Password managers without the marker, `wl-copy`, terminals and
+  most other tools are captured in full. When you copy secrets regularly, use a short
+  `--auto-clear-days`, or pause history with `--disable-capture` while you handle them.
+- **One clear can be undone once.** When the application that owns the clipboard exits, the daemon
+  offers the last copy again, so a paste still works after the source is closed. Wayland reports a
+  clear in the same way as an exit, so the daemon also re-offers after a clear of a selection it
+  does not own. A second clear removes it, because the daemon then owns the selection and honours
+  the clear. A clear of a selection the daemon skips, such as one marked by a password manager, is
+  never undone. `--disable-capture` pauses history only: the daemon still keeps the current
+  selection in memory and re-offers it once after a clear.
 
 ## Ecosystem
 

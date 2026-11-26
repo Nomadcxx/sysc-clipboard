@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -615,5 +616,29 @@ func nextUpdate(t *testing.T, updates <-chan Update) Update {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for clipboard client update")
 		return Update{}
+	}
+}
+
+func TestVerifyDaemonPeerChecksSocketOwner(t *testing.T) {
+	served := make(chan net.Conn, 1)
+	path := startClientServer(t, func(connection net.Conn) { served <- connection })
+	connection, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	<-served
+
+	if err := verifyDaemonPeer(connection, uint32(os.Getuid())); err != nil {
+		t.Fatalf("same-user daemon rejected: %v", err)
+	}
+	if err := verifyDaemonPeer(connection, uint32(os.Getuid())+1); !errors.Is(err, ErrUntrustedDaemon) {
+		t.Fatalf("other-user daemon error = %v, want ErrUntrustedDaemon", err)
+	}
+	pipe, other := net.Pipe()
+	defer pipe.Close()
+	defer other.Close()
+	if err := verifyDaemonPeer(pipe, uint32(os.Getuid())); !errors.Is(err, ErrUntrustedDaemon) {
+		t.Fatalf("non-socket error = %v, want ErrUntrustedDaemon", err)
 	}
 }

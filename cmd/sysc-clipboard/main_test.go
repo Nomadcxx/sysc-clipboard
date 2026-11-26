@@ -81,8 +81,8 @@ func TestParseOptionsDefaultsToProtocolHistoryCaps(t *testing.T) {
 	if parsed.limits != history.DefaultLimits() {
 		t.Fatalf("limits = %+v, want defaults %+v", parsed.limits, history.DefaultLimits())
 	}
-	if parsed.autoClearDays != 0 || parsed.clearAtStartup {
-		t.Fatalf("default retention = days %d, clear-at-startup %t; want disabled", parsed.autoClearDays, parsed.clearAtStartup)
+	if parsed.autoClearDays != 30 || parsed.clearAtStartup {
+		t.Fatalf("default retention = days %d, clear-at-startup %t; want 30 days without a startup clear", parsed.autoClearDays, parsed.clearAtStartup)
 	}
 }
 

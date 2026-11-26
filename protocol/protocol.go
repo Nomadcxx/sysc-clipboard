@@ -100,8 +100,10 @@ const (
 	ErrorConflict    ErrorCode = "conflict"
 )
 
-// Entry contains metadata only. Payload bytes never cross the client
-// protocol.
+// Entry contains metadata only: payload bytes never cross the wire. This
+// limits what a frame carries, not what a client can do. A restore command
+// publishes the full payload to the system clipboard, and the daemon accepts
+// any client with its uid, so every same-user process holds that authority.
 type Entry struct {
 	ID          string    `json:"id"`
 	Kind        Kind      `json:"kind"`

@@ -132,8 +132,11 @@ func (history *History) Capture(capture Capture) ([]protocol.Change, error) {
 	if capture.Kind != protocol.KindText && capture.Kind != protocol.KindImage {
 		return nil, fmt.Errorf("%w: unsupported kind %q", ErrInvalidCapture, capture.Kind)
 	}
-	if capture.Kind == protocol.KindText && len(capture.Payload) == 0 {
-		return nil, ErrEmptyText
+	if capture.Kind == protocol.KindText {
+		capture.Payload = SanitizeText(capture.Payload)
+		if len(capture.Payload) == 0 {
+			return nil, ErrEmptyText
+		}
 	}
 	if len(capture.Payload) == 0 {
 		return nil, fmt.Errorf("%w: empty image payload", ErrInvalidCapture)
@@ -513,6 +516,38 @@ func mergeMIME(old, current []string) []string {
 		}
 	}
 	return merged
+}
+
+// SanitizeText removes the control characters a terminal acts on: C0
+// controls other than tab, line feed and carriage return, DEL, and C1
+// controls, both UTF-8 encoded and as raw bytes. A pasted escape sequence
+// can retitle a terminal, write its clipboard or reach its command line, and
+// history would replay it long after the original copy. Other bytes,
+// including invalid UTF-8, are kept.
+func SanitizeText(payload []byte) []byte {
+	clean := make([]byte, 0, len(payload))
+	for rest := payload; len(rest) > 0; {
+		r, size := utf8.DecodeRune(rest)
+		if r == utf8.RuneError && size == 1 {
+			r = rune(rest[0])
+		}
+		if !terminalControl(r) {
+			clean = append(clean, rest[:size]...)
+		}
+		rest = rest[size:]
+	}
+	return clean
+}
+
+func terminalControl(r rune) bool {
+	switch {
+	case r == '\t' || r == '\n' || r == '\r':
+		return false
+	case r < 0x20 || r == 0x7f:
+		return true
+	default:
+		return r >= 0x80 && r <= 0x9f
+	}
 }
 
 func preview(payload []byte, kind protocol.Kind) string {

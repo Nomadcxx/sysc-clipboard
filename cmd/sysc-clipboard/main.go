@@ -22,6 +22,10 @@ import (
 
 const maxAutoClearDays = int64((1<<63 - 1) / int64(24*time.Hour))
 
+// defaultAutoClearDays bounds how long an unpinned entry, which may hold a
+// copied secret, stays on disk unless the user chooses otherwise.
+const defaultAutoClearDays = 30
+
 type options struct {
 	keyFile        string
 	stateDir       string
@@ -95,7 +99,7 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	flags.StringVar(&parsed.stateDir, "state-dir", "", help("clipboard state directory"))
 	flags.BoolVar(&parsed.check, "check", false, help("check persistence and runtime configuration, then exit"))
 	flags.BoolVar(&parsed.disableCapture, "disable-capture", false, help("disable clipboard history capture; copy and existing history remain available"))
-	flags.IntVar(&parsed.autoClearDays, "auto-clear-days", 0, help("maximum age in days before unpinned entries are removed; 0 disables auto-clear"))
+	flags.IntVar(&parsed.autoClearDays, "auto-clear-days", defaultAutoClearDays, help("maximum age in days before unpinned entries are removed; 0 disables auto-clear"))
 	flags.BoolVar(&parsed.clearAtStartup, "clear-at-startup", false, help("clear all clipboard history when the daemon starts"))
 	flags.IntVar(&parsed.limits.MaxEntries, "max-entries", defaults.MaxEntries, help("maximum retained history entries"))
 	flags.Uint64Var(&parsed.limits.MaxTotalBytes, "max-total-bytes", defaults.MaxTotalBytes, help("maximum combined history payload bytes"))
