@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +15,72 @@ import (
 	"github.com/Nomadcxx/sysc-clipboard/internal/store"
 	"github.com/Nomadcxx/sysc-clipboard/protocol"
 )
+
+type stubOwner struct {
+	run func(context.Context) error
+}
+
+func (owner *stubOwner) Run(ctx context.Context) error { return owner.run(ctx) }
+
+func (owner *stubOwner) Restore(context.Context, history.Item) error { return nil }
+
+func TestOwnerSupervisorRetriesFailedConnections(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := log.New(io.Discard, "", 0)
+	attempts := 0
+	fake := &stubOwner{run: func(context.Context) error {
+		cancel()
+		return context.Canceled
+	}}
+	var published []waylandOwner
+	runOwnerSupervisor(ctx, logger, func() (waylandOwner, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, errors.New("compositor unavailable")
+		}
+		return fake, nil
+	}, func(owner waylandOwner) {
+		published = append(published, owner)
+	}, func(int) time.Duration { return 0 })
+	if attempts != 3 {
+		t.Fatalf("connection attempts = %d, want 3", attempts)
+	}
+	if len(published) != 2 || published[0] != fake || published[1] != nil {
+		t.Fatalf("published owners = %#v, want the fake then nil", published)
+	}
+}
+
+func TestOwnerSupervisorReconnectsAfterOwnerRunFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := log.New(io.Discard, "", 0)
+	attempts := 0
+	lost := &stubOwner{run: func(context.Context) error { return errors.New("connection lost") }}
+	runOwnerSupervisor(ctx, logger, func() (waylandOwner, error) {
+		attempts++
+		if attempts == 1 {
+			return lost, nil
+		}
+		cancel()
+		return nil, errors.New("compositor shutting down")
+	}, func(waylandOwner) {}, func(int) time.Duration { return 0 })
+	if attempts != 2 {
+		t.Fatalf("connection attempts = %d, want 2", attempts)
+	}
+}
+
+func TestOwnerRetryDelayIsCapped(t *testing.T) {
+	if got := ownerRetryDelay(0); got != time.Second {
+		t.Fatalf("first retry delay = %v, want 1s", got)
+	}
+	if got := ownerRetryDelay(2); got != 4*time.Second {
+		t.Fatalf("third retry delay = %v, want 4s", got)
+	}
+	if got := ownerRetryDelay(100); got != 30*time.Second {
+		t.Fatalf("late retry delay = %v, want 30s", got)
+	}
+}
 
 func TestResolveStateDirRequiresAbsoluteOverride(t *testing.T) {
 	if _, err := resolveStateDir("relative"); err == nil {
