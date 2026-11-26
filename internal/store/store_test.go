@@ -97,6 +97,55 @@ func TestStoreRoundTripKeepsPrivateEncryptedFiles(t *testing.T) {
 	}
 }
 
+func TestSaveSyncsPayloadDirectoryBeforeManifest(t *testing.T) {
+	key := bytes.Repeat([]byte{13}, KeyBytes)
+	store, err := New(filepath.Join(t.TempDir(), "state"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := make([]string, 0, 2)
+	store.syncDir = func(path string) error {
+		switch path {
+		case store.entriesDir:
+			if _, err := os.Stat(store.manifestPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("manifest exists before payload directory sync: %v", err)
+			}
+			order = append(order, "entries")
+		case store.root:
+			order = append(order, "root")
+		default:
+			t.Fatalf("unexpected sync path %q", path)
+		}
+		return nil
+	}
+	if err := store.Save(testItems(t)); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 || order[0] != "entries" || order[1] != "root" {
+		t.Fatalf("sync order = %v, want payload directory then state root", order)
+	}
+}
+
+func TestSaveDoesNotPublishManifestWhenPayloadDirectorySyncFails(t *testing.T) {
+	key := bytes.Repeat([]byte{14}, KeyBytes)
+	store, err := New(filepath.Join(t.TempDir(), "state"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.syncDir = func(path string) error {
+		if path == store.entriesDir {
+			return errors.New("injected payload directory sync failure")
+		}
+		return nil
+	}
+	if err := store.Save(testItems(t)); err == nil {
+		t.Fatal("payload directory sync failure was not returned")
+	}
+	if _, err := os.Stat(store.manifestPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("manifest published after failed payload directory sync: %v", err)
+	}
+}
+
 func TestLoadPreservesCorruptManifest(t *testing.T) {
 	key := bytes.Repeat([]byte{9}, KeyBytes)
 	store, err := New(filepath.Join(t.TempDir(), "state"), key)
