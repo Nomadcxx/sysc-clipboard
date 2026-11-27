@@ -43,6 +43,7 @@ type Store struct {
 	now          func() time.Time
 	writeFile    func(path string, data []byte, perm fs.FileMode) error
 	renameFile   func(oldPath, newPath string) error
+	syncDir      func(path string) error
 }
 
 type manifest struct {
@@ -172,10 +173,13 @@ func (store *Store) Save(items []history.Item) error {
 			return fmt.Errorf("commit clipboard payload: %w", err)
 		}
 	}
+	if err := store.sync(store.entriesDir); err != nil {
+		return fmt.Errorf("sync clipboard payload directory: %w", err)
+	}
 	if err := store.rename(manifestTemporary, store.manifestPath); err != nil {
 		return fmt.Errorf("commit clipboard manifest: %w", err)
 	}
-	if err := syncDirectory(store.root); err != nil {
+	if err := store.sync(store.root); err != nil {
 		return fmt.Errorf("sync clipboard state directory: %w", err)
 	}
 	store.garbageCollect(entries)
@@ -344,6 +348,13 @@ func (store *Store) rename(oldPath, newPath string) error {
 		return store.renameFile(oldPath, newPath)
 	}
 	return os.Rename(oldPath, newPath)
+}
+
+func (store *Store) sync(path string) error {
+	if store.syncDir != nil {
+		return store.syncDir(path)
+	}
+	return syncDirectory(path)
 }
 
 func (store *Store) garbageCollect(entries []protocol.Entry) {
