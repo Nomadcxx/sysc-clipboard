@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -258,8 +259,63 @@ func applyStartupCleanup(state *runtimeState, autoClearDays int, clearAtStartup 
 	return nil
 }
 
+type waylandOwner interface {
+	Run(context.Context) error
+	Restore(context.Context, history.Item) error
+}
+
+// ownerRetryDelay backs off reconnects so a compositor that is still starting
+// or restarting is retried without spinning.
+func ownerRetryDelay(attempt int) time.Duration {
+	delay := time.Second
+	for index := 0; index < attempt && delay < 30*time.Second; index++ {
+		delay *= 2
+	}
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	return delay
+}
+
+// runOwnerSupervisor keeps a Wayland owner connected for the daemon lifetime.
+// A failed startup connection or a lost compositor connection must not leave
+// the daemon serving an unusable clipboard until the next manual restart.
+func runOwnerSupervisor(ctx context.Context, logger *log.Logger, newOwner func() (waylandOwner, error), setOwner func(waylandOwner), retryDelay func(int) time.Duration) {
+	attempt := 0
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		owner, err := newOwner()
+		if err == nil {
+			setOwner(owner)
+			err = owner.Run(ctx)
+			setOwner(nil)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			logger.Printf("Wayland owner stopped: %v", err)
+		}
+		delay := ownerRetryDelay(attempt)
+		if retryDelay != nil {
+			delay = retryDelay(attempt)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		attempt++
+	}
+}
+
 func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, disableCapture bool, historyTTL time.Duration) error {
-	var owner *wayland.Owner
+	var ownerMu sync.RWMutex
+	var owner waylandOwner
 	service := daemon.NewService(daemon.Options{
 		History:        state.history,
 		Store:          state.store,
@@ -268,10 +324,13 @@ func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, d
 		DisableCapture: disableCapture,
 		HistoryTTL:     historyTTL,
 		Restore: func(ctx context.Context, item history.Item) error {
-			if owner == nil {
+			ownerMu.RLock()
+			current := owner
+			ownerMu.RUnlock()
+			if current == nil {
 				return daemon.ErrRestoreUnavailable
 			}
-			return owner.Restore(ctx, item)
+			return current.Restore(ctx, item)
 		},
 	})
 	defer service.Close()
@@ -295,12 +354,6 @@ func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, d
 			return service.SetWaylandState(ctx, state)
 		},
 	}
-	var err error
-	owner, err = wayland.NewOwner(serviceOptions)
-	if err != nil {
-		logger.Printf("Wayland unavailable: %v", err)
-	}
-
 	serverPath, err := daemon.DefaultSocketPath()
 	if err != nil {
 		return fmt.Errorf("resolve clipboard socket: %w", err)
@@ -316,17 +369,22 @@ func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, d
 	serverDone := make(chan error, 1)
 	go func() { serverDone <- server.Serve(ctx) }()
 
-	ownerDone := make(chan error, 1)
-	ownerFinished := true
-	if owner != nil {
-		ownerFinished = false
-		go func() { ownerDone <- owner.Run(ctx) }()
-	}
+	ownerDone := make(chan struct{})
+	go func() {
+		defer close(ownerDone)
+		runOwnerSupervisor(ctx, logger, func() (waylandOwner, error) {
+			return wayland.NewOwner(serviceOptions)
+		}, func(next waylandOwner) {
+			ownerMu.Lock()
+			owner = next
+			ownerMu.Unlock()
+		}, ownerRetryDelay)
+	}()
 
 	serverFinished := false
 	var runErr error
 	ctxDone := ctx.Done()
-	for !serverFinished || !ownerFinished {
+	for !serverFinished {
 		select {
 		case err := <-serverDone:
 			serverFinished = true
@@ -335,16 +393,13 @@ func runDaemon(parent context.Context, state runtimeState, logger *log.Logger, d
 				cancel()
 				_ = server.Close()
 			}
-		case err := <-ownerDone:
-			ownerFinished = true
-			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, wayland.ErrOwnerUnavailable) {
-				logger.Printf("Wayland owner stopped: %v", err)
-			}
 		case <-ctxDone:
 			cancel()
 			_ = server.Close()
 			ctxDone = nil
 		}
 	}
+	cancel()
+	<-ownerDone
 	return runErr
 }
