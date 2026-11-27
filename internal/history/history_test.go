@@ -203,6 +203,44 @@ func TestReplaceKeepsPinnedEntriesWhenConfiguredCapsAreLowered(t *testing.T) {
 	}
 }
 
+func TestCaptureEvictsOldEntriesToKeepSnapshotMetadataBounded(t *testing.T) {
+	h := New(1)
+	when := time.Unix(1, 0).UTC()
+	mime := strings.Repeat(`"`, protocol.MaxMIMEBytes-1) + "a"
+	offered := make([]string, protocol.MaxOfferedMIME)
+	for index := range offered {
+		offered[index] = mime[:protocol.MaxMIMEBytes-1] + "abcdefghijklmnopqrstuvwxyz012345"[index:index+1]
+	}
+	offered[0] = mime
+
+	const captures = 70
+	for index := 0; index < captures; index++ {
+		_, err := h.Capture(Capture{
+			Generation:  1,
+			Kind:        protocol.KindText,
+			MIME:        mime,
+			OfferedMIME: offered,
+			Payload:     []byte("payload-" + string(rune('a'+index%26)) + string(rune('0'+index%10))),
+			CapturedAt:  when.Add(time.Duration(index) * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("capture %d: %v", index, err)
+		}
+	}
+
+	entries := h.Snapshot()
+	if len(entries) == 0 || len(entries) >= captures {
+		t.Fatalf("entries after %d captures = %d, want some eviction", captures, len(entries))
+	}
+	if err := protocol.ValidateSnapshot(protocol.Snapshot{
+		Entries:     entries,
+		Persistence: protocol.PersistenceDurable,
+		Wayland:     protocol.WaylandReady,
+	}); err != nil {
+		t.Fatalf("history snapshot metadata is invalid: %v", err)
+	}
+}
+
 func TestHistoryRejectsPerEntryLimitsEmptyTextAndStaleGeneration(t *testing.T) {
 	h := New(4)
 	when := time.Unix(1, 0).UTC()

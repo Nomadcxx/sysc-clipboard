@@ -14,16 +14,17 @@ import (
 const (
 	Version = 1
 
-	MaxFrame        = 1 << 20
-	MaxJSONDepth    = 32
-	MaxIDBytes      = 128
-	MaxMIMEBytes    = 256
-	MaxPreviewBytes = 200
-	MaxOfferedMIME  = 32
-	MaxEntries      = 100
-	MaxTotalBytes   = 256 << 20
-	MaxTextBytes    = 4 << 20
-	MaxImageBytes   = 32 << 20
+	MaxFrame         = 1 << 20
+	MaxSnapshotBytes = MaxFrame - 1024
+	MaxJSONDepth     = 32
+	MaxIDBytes       = 128
+	MaxMIMEBytes     = 256
+	MaxPreviewBytes  = 200
+	MaxOfferedMIME   = 32
+	MaxEntries       = 100
+	MaxTotalBytes    = 256 << 20
+	MaxTextBytes     = 4 << 20
+	MaxImageBytes    = 32 << 20
 
 	MaxCapabilities    = 32
 	MaxCapabilityBytes = 64
@@ -334,6 +335,13 @@ func ValidateSnapshot(snapshot Snapshot) error {
 			return fmt.Errorf("snapshot payload total exceeds %d bytes", MaxTotalBytes)
 		}
 		bytes += entry.Size
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("encode snapshot metadata: %w", err)
+	}
+	if len(encoded) > MaxSnapshotBytes {
+		return fmt.Errorf("snapshot metadata exceeds %d bytes", MaxSnapshotBytes)
 	}
 	return nil
 }
