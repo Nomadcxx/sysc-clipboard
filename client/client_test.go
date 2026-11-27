@@ -642,3 +642,24 @@ func TestVerifyDaemonPeerChecksSocketOwner(t *testing.T) {
 		t.Fatalf("non-socket error = %v, want ErrUntrustedDaemon", err)
 	}
 }
+
+// #28: a slow Updates consumer must not lose command replies when state
+// updates fill the channel.
+func TestClientCoalescingPreservesCommandReplies(t *testing.T) {
+	client := newClientWithOptions("/tmp/clipboard-test.sock", clientOptions{})
+	for revision := uint64(1); revision <= inboundQueueSize; revision++ {
+		snapshot := testSnapshot(revision, nil)
+		client.markConnected(protocol.Message{Version: protocol.Version, Type: protocol.TypeSnapshot, Snapshot: &snapshot}, snapshot)
+	}
+	ack := protocol.Message{Version: protocol.Version, Type: protocol.TypeAck, RequestID: "request-1", Ack: &protocol.Ack{Revision: 1}}
+	client.emit(ack, true)
+	update := nextUpdate(t, client.Updates())
+	if update.Message.Type != protocol.TypeAck || update.Message.RequestID != "request-1" {
+		t.Fatalf("coalesced updates lost the reply: %+v", update)
+	}
+	select {
+	case extra := <-client.Updates():
+		t.Fatalf("coalesced queue retained stale state: %+v", extra)
+	default:
+	}
+}

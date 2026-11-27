@@ -17,9 +17,10 @@ import (
 )
 
 var (
-	ErrSocketInUse  = errors.New("clipboard socket is already in use")
-	ErrSocketOwner  = errors.New("clipboard socket is owned by another user")
-	ErrServerClosed = errors.New("clipboard server is closed")
+	ErrSocketInUse       = errors.New("clipboard socket is already in use")
+	ErrSocketOwner       = errors.New("clipboard socket is owned by another user")
+	ErrServerClosed      = errors.New("clipboard server is closed")
+	ErrOutboundQueueFull = errors.New("clipboard outbound queue full")
 )
 
 const (
@@ -483,11 +484,40 @@ func newOutboundQueue(capacity int) *outboundQueue {
 	}
 }
 
+// coalescibleState reports whether message can be replaced by the snapshot
+// that follows an overflow. Command replies and errors must survive.
+func coalescibleState(message protocol.Message) bool {
+	switch message.Type {
+	case protocol.TypeSnapshot, protocol.TypeDelta:
+		return true
+	}
+	return false
+}
+
 func (queue *outboundQueue) Enqueue(message protocol.Message, currentSnapshot func() (protocol.Message, error)) error {
 	queue.mu.Lock()
 	if queue.closed {
 		queue.mu.Unlock()
 		return ErrServerClosed
+	}
+	if !coalescibleState(message) {
+		// Replies share the queue with subscription updates. Keep them even
+		// when state has filled it, up to the same bound, so a slow writer
+		// cannot grow the queue without limit.
+		controls := 0
+		for _, pending := range queue.pending {
+			if !coalescibleState(pending) {
+				controls++
+			}
+		}
+		if controls >= queue.capacity {
+			queue.mu.Unlock()
+			return ErrOutboundQueueFull
+		}
+		queue.pending = append(queue.pending, message)
+		queue.signalLocked()
+		queue.mu.Unlock()
+		return nil
 	}
 	if len(queue.pending) < queue.capacity {
 		queue.pending = append(queue.pending, message)
@@ -500,7 +530,15 @@ func (queue *outboundQueue) Enqueue(message protocol.Message, currentSnapshot fu
 		return nil
 	}
 	queue.resyncing = true
-	queue.pending = nil
+	// Drop only stale state. Replies already queued stay ahead of the
+	// snapshot that repairs the state.
+	kept := queue.pending[:0]
+	for _, pending := range queue.pending {
+		if !coalescibleState(pending) {
+			kept = append(kept, pending)
+		}
+	}
+	queue.pending = kept
 	queue.mu.Unlock()
 
 	snapshot, err := currentSnapshot()
